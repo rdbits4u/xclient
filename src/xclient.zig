@@ -4,8 +4,8 @@ const nsrdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
 const c = @cImport(
 {
-    @cInclude("librdpc_gcc.h");
-    @cInclude("librdpc_constants.h");
+    @cInclude("rdp_gcc.h");
+    @cInclude("rdp_constants.h");
     @cInclude("librdpc.h");
 });
 
