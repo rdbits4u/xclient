@@ -1,11 +1,8 @@
-
 const std = @import("std");
-const nsrdpc_session = @import("rdpc_session.zig");
+const rdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
 const c = @cImport(
 {
-    @cInclude("rdp_gcc.h");
-    @cInclude("rdp_constants.h");
     @cInclude("librdpc.h");
 });
 
@@ -34,21 +31,21 @@ fn process_args(settings: *c.rdpc_settings_t) !void
 }
 
 //*****************************************************************************
-fn create_rdpc_session() !*nsrdpc_session.rdp_session_t
+fn create_rdpc_session() !*rdpc_session.rdp_session_t
 {
     const settings: *c.rdpc_settings_t =
             try g_allocator.create(c.rdpc_settings_t);
     defer g_allocator.destroy(settings);
     settings.* = .{};
     try process_args(settings);
-    return try nsrdpc_session.create(&g_allocator, settings);
+    return try rdpc_session.create(&g_allocator, settings);
 }
 
 //*****************************************************************************
 fn term_sig(_: c_int) callconv(.C) void
 {
     const msg: [4]u8 = .{ 'i', 'n', 't', 0 };
-    _ = posix.write(nsrdpc_session.g_term[1], msg[0..4]) catch
+    _ = posix.write(rdpc_session.g_term[1], msg[0..4]) catch
         return;
 }
 
@@ -73,15 +70,17 @@ fn setup_signals() !void
 //*****************************************************************************
 pub fn main() !void
 {
-    nsrdpc_session.g_term = try posix.pipe();
+    rdpc_session.g_term = try posix.pipe();
     defer
     {
-        posix.close(nsrdpc_session.g_term[0]);
-        posix.close(nsrdpc_session.g_term[1]);
+        posix.close(rdpc_session.g_term[0]);
+        posix.close(rdpc_session.g_term[1]);
     }
     try setup_signals();
-    const rdpc_session = try create_rdpc_session();
-    defer rdpc_session.delete();
-    try rdpc_session.connect();
-    try rdpc_session.loop();
+    try rdpc_session.init();
+    defer rdpc_session.deinit();
+    const session = try create_rdpc_session();
+    defer session.delete();
+    try session.connect();
+    try session.loop();
 }
