@@ -168,24 +168,35 @@ pub fn create(allocator: *const std.mem.Allocator,
     errdefer allocator.destroy(self);
     self.* = .{};
     self.allocator = allocator;
-    var rv = c.rdpc_init();
+    var rdpc: ?*c.rdpc_t = null;
+    const rv = c.rdpc_create(settings, &rdpc);
     if (rv == c.LIBRDPC_ERROR_NONE)
     {
-        var rdpc: ?*c.rdpc_t = null;
-        rv = c.rdpc_create(settings, &rdpc);
-        if (rv == c.LIBRDPC_ERROR_NONE)
+        if (rdpc) |ardpc|
         {
-            if (rdpc) |ardpc|
-            {
-                ardpc.user[0] = self;
-                ardpc.log_msg = cb_log_msg;
-                ardpc.send_to_server = cb_send_to_server;
-                self.rdpc = ardpc;
-                return self;
-            }
+            ardpc.user[0] = self;
+            ardpc.log_msg = cb_log_msg;
+            ardpc.send_to_server = cb_send_to_server;
+            self.rdpc = ardpc;
+            return self;
         }
     }
     return error.OutOfMemory;
+}
+
+//*****************************************************************************
+pub fn init() !void
+{
+    if (c.rdpc_init() != c.LIBRDPC_ERROR_NONE)
+    {
+        return  error.OutOfMemory;
+    }
+}
+
+//*****************************************************************************
+pub fn deinit() void
+{
+    _ = c.rdpc_deinit();
 }
 
 //*****************************************************************************
