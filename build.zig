@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void
 {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // xclient
     const xclient = b.addExecutable(.{
         .name = "xclient",
         .root_source_file = b.path("src/xclient.zig"),
