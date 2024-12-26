@@ -37,11 +37,11 @@ pub const rdp_session_t = struct
             return c.LIBRDPC_ERROR_MEMORY;
         const sent = posix.send(self.sck, data, 0) catch
             return c.LIBRDPC_ERROR_PARSE;
-        std.debug.print("send_slice_to_server: sent {}\n", .{sent});
+        std.debug.print("{s}: sent {}\n", .{@src().fn_name, sent});
         if (sent != data.len)
         {
-            std.debug.print("send failed sent {} data.len {}\n",
-                    .{sent, data.len});
+            std.debug.print("{s}: send failed sent {} data.len {}\n",
+                    .{@src().fn_name, sent, data.len});
         }
         return c.LIBRDPC_ERROR_NONE;
     }
@@ -49,22 +49,74 @@ pub const rdp_session_t = struct
     //*************************************************************************
     pub fn connect(self: *rdp_session_t) !void
     {
-        const address = try net.Address.parseIp("205.5.60.2", 3389);
+        const address = try net.Address.parseIp("192.168.1.1", 3389);
         const tpe: u32 = posix.SOCK.STREAM;
         const protocol = posix.IPPROTO.TCP;
         self.sck = try posix.socket(address.any.family, tpe, protocol);
-        try posix.connect(self.sck, &address.any, @sizeOf(net.Address));
+        // set non blocking
+        var val1 = try posix.fcntl(self.sck, posix.F.GETFL, 0);
+        if ((val1 & posix.SOCK.NONBLOCK) == 0)
+        {
+            val1 = val1 | posix.SOCK.NONBLOCK;
+            _ = try posix.fcntl(self.sck, posix.F.SETFL, val1);
+        }
+        // connect
+        posix.connect(self.sck, &address.any, @sizeOf(net.Address)) catch |err|
+        {
+            if (err != error.WouldBlock)
+            {
+                return err;
+            }
+            // wait for socket to become writable(connected), timeout, or term
+            var count_down: usize = 5; // 5 seconds
+            while (true)
+            {
+                std.debug.print("{s}: loop\n", .{@src().fn_name});
+                if (count_down < 1)
+                {
+                    return err;
+                }
+                var polls: [2]posix.pollfd = undefined;
+                polls[0].fd = self.sck;
+                polls[0].events = posix.POLL.OUT;
+                polls[0].revents = 0;
+                polls[1].fd = g_term[0];
+                polls[1].events = posix.POLL.IN;
+                polls[1].revents = 0;
+                const poll_rv = try posix.poll(polls[0..2], 1000);
+                if (poll_rv > 0)
+                {
+                    if ((polls[0].revents & posix.POLL.OUT) != 0)
+                    {
+                        std.debug.print("{s}: ok\n", .{@src().fn_name});
+                        break;
+                    }
+                    if ((polls[1].revents & posix.POLL.IN) != 0)
+                    {
+                        var term_data: [4]u8 = undefined;
+                        const readed = try posix.read(g_term[0],
+                                term_data[0..4]);
+                        std.debug.print("{s}: {s} {}\n",
+                                .{@src().fn_name,
+                                "term set shutting down readed",
+                                readed});
+                        return err;
+                    }
+                }
+                count_down -= 1;
+            }
+        };
     }
 
     //*************************************************************************
     // data from the rdp server
     fn read_process_server_data(self: *rdp_session_t) !void
     {
-        std.debug.print("read_process_server_data: server sck is set\n", .{});
+        std.debug.print("{s}: server sck is set\n", .{@src().fn_name});
         const recv_slice = self.in_data_slice[self.recv_start..];
         const recv_rv = try posix.recv(self.sck, recv_slice, 0);
-        std.debug.print("read_process_server_data: recv_rv {} recv_start {}\n",
-                .{recv_rv, self.recv_start});
+        std.debug.print("{s}: recv_rv {} recv_start {}\n",
+                .{@src().fn_name, recv_rv, self.recv_start});
         if (recv_rv > 0)
         {
             const end = self.recv_start + recv_rv;
@@ -95,7 +147,8 @@ pub const rdp_session_t = struct
             }
             else
             {
-                std.debug.print("read_process_server_data: rdpc_process_server_data error {}\n", .{rv});
+                std.debug.print("{s}: rdpc_process_server_data error {}\n",
+                        .{@src().fn_name, rv});
                 return;
             }
         }
@@ -107,7 +160,8 @@ pub const rdp_session_t = struct
         const rv = c.rdpc_start(self.rdpc);
         if (rv != c.LIBRDPC_ERROR_NONE)
         {
-            std.debug.print("loop: rdpc_start failed error {}\n", .{rv});
+            std.debug.print("{s}: rdpc_start failed error {}\n",
+                    .{@src().fn_name, rv});
             return;
         }
         self.in_data_slice = try self.allocator.alloc(u8,
@@ -117,7 +171,7 @@ pub const rdp_session_t = struct
         var poll_count: usize = undefined;
         while (true)
         {
-            std.debug.print("loop: loop\n", .{});
+            std.debug.print("{s}: loop\n", .{@src().fn_name});
             poll_count = 0;
             polls[poll_count].fd = self.sck;
             polls[poll_count].events = posix.POLL.IN;
@@ -131,8 +185,8 @@ pub const rdp_session_t = struct
             poll_count += 1;
             const active = polls[0..poll_count];
             const poll_rv = try posix.poll(active, -1);
-            std.debug.print("loop: poll_rv {} revents {}\n",
-                    .{poll_rv, active[ssck_index].revents});
+            std.debug.print("{s}: poll_rv {} revents {}\n",
+                    .{@src().fn_name, poll_rv, active[ssck_index].revents});
             if (poll_rv > 0)
             {
                 if ((active[ssck_index].revents & posix.POLL.IN) != 0)
@@ -143,8 +197,8 @@ pub const rdp_session_t = struct
                 {
                     var term_data: [4]u8 = undefined;
                     const readed = try posix.read(g_term[0], term_data[0..4]);
-                    std.debug.print("loop: term set shutting down readed {}\n",
-                            .{readed});
+                    std.debug.print("{s}: term set shutting down readed {}\n",
+                            .{@src().fn_name, readed});
                     break;
                 }
             }
@@ -155,7 +209,7 @@ pub const rdp_session_t = struct
     fn log_msg(self: *rdp_session_t, msg: []u8) !void
     {
         _ = self;
-        std.debug.print("log_msg: msg [{s}]\n", .{msg});
+        std.debug.print("{s}: msg [{s}]\n", .{@src().fn_name, msg});
     }
 
 };
@@ -242,7 +296,7 @@ fn cb_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
             }
         }
     }
-    std.debug.print("cb_log_msg: nil\n", .{});
+    std.debug.print("{s}: nil\n", .{@src().fn_name});
     return c.LIBRDPC_ERROR_NONE;
 }
 
