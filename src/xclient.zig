@@ -57,6 +57,7 @@ fn pipe_sig(_: c_int) callconv(.C) void
 //*****************************************************************************
 fn setup_signals() !void
 {
+    rdpc_session.g_term = try posix.pipe();
     var sa: posix.Sigaction = undefined;
     sa.mask = posix.empty_sigset;
     sa.flags = 0;
@@ -68,15 +69,17 @@ fn setup_signals() !void
 }
 
 //*****************************************************************************
+fn cleanup_signals() void
+{
+    posix.close(rdpc_session.g_term[0]);
+    posix.close(rdpc_session.g_term[1]);
+}
+
+//*****************************************************************************
 pub fn main() !void
 {
-    rdpc_session.g_term = try posix.pipe();
-    defer
-    {
-        posix.close(rdpc_session.g_term[0]);
-        posix.close(rdpc_session.g_term[1]);
-    }
     try setup_signals();
+    defer cleanup_signals();
     try rdpc_session.init();
     defer rdpc_session.deinit();
     const session = try create_rdpc_session();

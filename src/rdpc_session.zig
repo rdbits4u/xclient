@@ -1,4 +1,3 @@
-
 const std = @import("std");
 const hexdump = @import("hexdump");
 const net = std.net;
@@ -10,13 +9,23 @@ const c = @cImport(
 
 pub var g_term: [2]i32 = .{-1, -1};
 
+const send_t = struct
+{
+    sent: usize = 0,
+    out_data_slice: []u8 = undefined,
+    next: ?*send_t = null,
+};
+
 pub const rdp_session_t = struct
 {
     allocator: *const std.mem.Allocator = undefined,
     rdpc: *c.rdpc_t = undefined,
-    sck: c_int = -1,
+    connected: bool = false,
+    sck: i32 = -1,
     recv_start: usize = 0,
     in_data_slice: []u8 = undefined,
+    send_head: ?*send_t = null,
+    send_tail: ?*send_t = null,
 
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
@@ -31,25 +40,52 @@ pub const rdp_session_t = struct
 
     //*************************************************************************
     // data to the rdp server
-    fn send_slice_to_server(self: *rdp_session_t, data: []u8) i32
+    fn send_slice_to_server(self: *rdp_session_t, data: []u8) !void
     {
-        hexdump.printHexDump(0, data) catch
-            return c.LIBRDPC_ERROR_MEMORY;
-        const sent = posix.send(self.sck, data, 0) catch
-            return c.LIBRDPC_ERROR_PARSE;
-        std.debug.print("{s}: sent {}\n", .{@src().fn_name, sent});
-        if (sent != data.len)
+        var slice = data;
+        // try to send
+        const result = posix.send(self.sck, slice, 0);
+        if (result) |aresult|
         {
-            std.debug.print("{s}: send failed sent {} data.len {}\n",
-                    .{@src().fn_name, sent, data.len});
+            std.debug.print("{s}: hexdump len {}\n",
+                    .{@src().fn_name, aresult});
+            try hexdump.printHexDump(0, slice[0..aresult]);
+            if (aresult >= slice.len)
+            {
+                // all sent, ok
+                return;
+            }
+            slice = slice[aresult..];
         }
-        return c.LIBRDPC_ERROR_NONE;
+        else |err|
+        {
+            if (err != error.WouldBlock)
+            {
+                return err;
+            }
+        }
+        // save any left over data to send later
+        const send: *send_t = try self.allocator.create(send_t);
+        send.* = .{};
+        send.out_data_slice = try self.allocator.alloc(u8, slice.len);
+        @memcpy(send.out_data_slice, slice);
+        if (self.send_tail) |asend_tail|
+        {
+            asend_tail.next = send;
+            self.send_tail = send;
+        }
+        else
+        {
+            self.send_head = send;
+            self.send_tail = send;
+        }
     }
 
     //*************************************************************************
     pub fn connect(self: *rdp_session_t) !void
     {
-        const address = try net.Address.parseIp("192.168.1.1", 3389);
+        const address = try net.Address.parseIp("127.0.0.1", 3389);
+        //const address = try net.Address.parseIp("205.5.60.19", 3389);
         const tpe: u32 = posix.SOCK.STREAM;
         const protocol = posix.IPPROTO.TCP;
         self.sck = try posix.socket(address.any.family, tpe, protocol);
@@ -61,51 +97,18 @@ pub const rdp_session_t = struct
             _ = try posix.fcntl(self.sck, posix.F.SETFL, val1);
         }
         // connect
-        posix.connect(self.sck, &address.any, @sizeOf(net.Address)) catch |err|
+        const result = posix.connect(self.sck, &address.any,
+                @sizeOf(net.Address));
+        if (result) |_|
+        { // no error
+        }
+        else |err|
         {
             if (err != error.WouldBlock)
             {
                 return err;
             }
-            // wait for socket to become writable(connected), timeout, or term
-            var count_down: usize = 5; // 5 seconds
-            while (true)
-            {
-                std.debug.print("{s}: loop\n", .{@src().fn_name});
-                if (count_down < 1)
-                {
-                    return err;
-                }
-                var polls: [2]posix.pollfd = undefined;
-                polls[0].fd = self.sck;
-                polls[0].events = posix.POLL.OUT;
-                polls[0].revents = 0;
-                polls[1].fd = g_term[0];
-                polls[1].events = posix.POLL.IN;
-                polls[1].revents = 0;
-                const poll_rv = try posix.poll(polls[0..2], 1000);
-                if (poll_rv > 0)
-                {
-                    if ((polls[0].revents & posix.POLL.OUT) != 0)
-                    {
-                        std.debug.print("{s}: ok\n", .{@src().fn_name});
-                        break;
-                    }
-                    if ((polls[1].revents & posix.POLL.IN) != 0)
-                    {
-                        var term_data: [4]u8 = undefined;
-                        const readed = try posix.read(g_term[0],
-                                term_data[0..4]);
-                        std.debug.print("{s}: {s} {}\n",
-                                .{@src().fn_name,
-                                "term set shutting down readed",
-                                readed});
-                        return err;
-                    }
-                }
-                count_down -= 1;
-            }
-        };
+        }
     }
 
     //*************************************************************************
@@ -119,8 +122,15 @@ pub const rdp_session_t = struct
                 .{@src().fn_name, recv_rv, self.recv_start});
         if (recv_rv > 0)
         {
+            if (!self.connected)
+            {
+                return error.Unexpected;
+            }
             const end = self.recv_start + recv_rv;
             const server_data_slice = self.in_data_slice[0..end];
+            std.debug.print("{s}: hexdump len {}\n",
+                    .{@src().fn_name, server_data_slice.len});
+            try hexdump.printHexDump(0, server_data_slice);
             // bytes_processed
             var bp_c_int: c_int = 0;
             // bytes_in_buf
@@ -130,8 +140,8 @@ pub const rdp_session_t = struct
                     server_data_slice.ptr, bib_c_int, &bp_c_int);
             if (rv == c.LIBRDPC_ERROR_NONE)
             {
-                // copy any left over data up to front of in_data_slice
                 const bp_u32: u32 = @bitCast(bp_c_int);
+                // copy any left over data up to front of in_data_slice
                 const slice = self.in_data_slice;
                 var start: u32 = 0;
                 while (bp_u32 + start < recv_rv)
@@ -155,17 +165,47 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn process_write_server_data(self: *rdp_session_t) !void
+    {
+        if (!self.connected)
+        {
+            self.connected = true;
+            std.debug.print("{s}: connected set\n", .{@src().fn_name});
+            // connected complete, lets start
+            const rv = c.rdpc_start(self.rdpc);
+            if (rv != c.LIBRDPC_ERROR_NONE)
+            {
+                std.debug.print("{s}: rdpc_start failed error {}\n",
+                        .{@src().fn_name, rv});
+                return;
+            }
+        }
+        if (self.send_head) |asend_head|
+        {
+            const send = asend_head;
+            const slice = send.out_data_slice[send.sent..];
+            send.sent += try posix.send(self.sck, slice, 0);
+            if (send.sent >= send.out_data_slice.len)
+            {
+                std.debug.print("{s}: hexdump len {}\n",
+                        .{@src().fn_name, send.out_data_slice.len});
+                try hexdump.printHexDump(0, send.out_data_slice);
+                self.send_head = send.next;
+                if (self.send_head == null)
+                {
+                    // if send_head is null, set send_tail to null
+                    self.send_tail = null;
+                }
+                self.allocator.free(send.out_data_slice);
+                self.allocator.destroy(send);
+            }
+        }                    
+    }
+
+    //*************************************************************************
     pub fn loop(self: *rdp_session_t) !void
     {
-        const rv = c.rdpc_start(self.rdpc);
-        if (rv != c.LIBRDPC_ERROR_NONE)
-        {
-            std.debug.print("{s}: rdpc_start failed error {}\n",
-                    .{@src().fn_name, rv});
-            return;
-        }
-        self.in_data_slice = try self.allocator.alloc(u8,
-                64 * 1024);
+        self.in_data_slice = try self.allocator.alloc(u8, 64 * 1024);
         defer self.allocator.free(self.in_data_slice);
         var polls: [16]posix.pollfd = undefined;
         var poll_count: usize = undefined;
@@ -175,6 +215,14 @@ pub const rdp_session_t = struct
             poll_count = 0;
             polls[poll_count].fd = self.sck;
             polls[poll_count].events = posix.POLL.IN;
+            if (!self.connected)
+            {
+                polls[poll_count].events |= posix.POLL.OUT;
+            }
+            if (self.send_head != null)
+            {
+                polls[poll_count].events |= posix.POLL.OUT;
+            }
             polls[poll_count].revents = 0;
             const ssck_index = poll_count;
             poll_count += 1;
@@ -193,12 +241,15 @@ pub const rdp_session_t = struct
                 {
                     try self.read_process_server_data();
                 }
+                if ((active[ssck_index].revents & posix.POLL.OUT) != 0)
+                {
+                    try self.process_write_server_data();
+                }
                 if ((active[term_index].revents & posix.POLL.IN) != 0)
                 {
-                    var term_data: [4]u8 = undefined;
-                    const readed = try posix.read(g_term[0], term_data[0..4]);
-                    std.debug.print("{s}: term set shutting down readed {}\n",
-                            .{@src().fn_name, readed});
+                    std.debug.print("{s}: {s}\n",
+                            .{@src().fn_name,
+                            "term set shutting down"});
                     break;
                 }
             }
@@ -206,7 +257,7 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    fn log_msg(self: *rdp_session_t, msg: []u8) !void
+    fn log_msg_slice(self: *rdp_session_t, msg: []u8) !void
     {
         _ = self;
         std.debug.print("{s}: msg [{s}]\n", .{@src().fn_name, msg});
@@ -276,13 +327,13 @@ fn cb_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
             {
                 const session: ?*rdp_session_t =
                         @alignCast(@ptrCast(ardpc.user[0]));
-                if (session) |ardp_session|
+                if (session) |asession|
                 {
                     // alloc for copy
-                    const lmsg: []u8 = ardp_session.allocator.alloc(u8,
+                    const lmsg: []u8 = asession.allocator.alloc(u8,
                             count) catch
                         return c.LIBRDPC_ERROR_MEMORY;
-                    defer ardp_session.allocator.free(lmsg);
+                    defer asession.allocator.free(lmsg);
                     // make a copy
                     var index: usize = 0;
                     while (index < count)
@@ -290,7 +341,7 @@ fn cb_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
                         lmsg[index] = amsg[index];
                         index += 1;
                     }
-                    try ardp_session.log_msg(lmsg);
+                    try asession.log_msg_slice(lmsg);
                     return c.LIBRDPC_ERROR_NONE;
                 }
             }
@@ -318,7 +369,9 @@ fn cb_send_to_server(rdpc: ?*c.rdpc_t,
                 var slice: []u8 = undefined;
                 slice.ptr = @ptrCast(adata);
                 slice.len = @intCast(bytes);
-                rv = ardp_session.send_slice_to_server(slice);
+                rv = c.LIBRDPC_ERROR_NONE;
+                ardp_session.send_slice_to_server(slice) catch
+                    return c.LIBRDPC_ERROR_PARSE;
             }
         }
     }
