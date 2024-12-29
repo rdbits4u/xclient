@@ -1,5 +1,6 @@
 const std = @import("std");
 const hexdump = @import("hexdump");
+const log = @import("log.zig");
 const net = std.net;
 const posix = std.posix;
 const c = @cImport(
@@ -9,6 +10,7 @@ const c = @cImport(
 
 pub var g_term: [2]i32 = .{-1, -1};
 
+// for storing left over data for server
 const send_t = struct
 {
     sent: usize = 0,
@@ -47,8 +49,8 @@ pub const rdp_session_t = struct
         const result = posix.send(self.sck, slice, 0);
         if (result) |aresult|
         {
-            std.debug.print("{s}: hexdump len {}\n",
-                    .{@src().fn_name, aresult});
+            try log.logln(log.LogLevel.debug, @src(), "hexdump len {}",
+                    .{aresult});
             try hexdump.printHexDump(0, slice[0..aresult]);
             if (aresult >= slice.len)
             {
@@ -115,11 +117,11 @@ pub const rdp_session_t = struct
     // data from the rdp server
     fn read_process_server_data(self: *rdp_session_t) !void
     {
-        std.debug.print("{s}: server sck is set\n", .{@src().fn_name});
+        try log.logln(log.LogLevel.debug, @src(), "server sck is set", .{});
         const recv_slice = self.in_data_slice[self.recv_start..];
         const recv_rv = try posix.recv(self.sck, recv_slice, 0);
-        std.debug.print("{s}: recv_rv {} recv_start {}\n",
-                .{@src().fn_name, recv_rv, self.recv_start});
+        try log.logln(log.LogLevel.debug, @src(), "recv_rv {} recv_start {}",
+                .{recv_rv, self.recv_start});
         if (recv_rv > 0)
         {
             if (!self.connected)
@@ -128,8 +130,8 @@ pub const rdp_session_t = struct
             }
             const end = self.recv_start + recv_rv;
             const server_data_slice = self.in_data_slice[0..end];
-            std.debug.print("{s}: hexdump len {}\n",
-                    .{@src().fn_name, server_data_slice.len});
+            try log.logln(log.LogLevel.debug, @src(), "hexdump len {}",
+                    .{server_data_slice.len});
             try hexdump.printHexDump(0, server_data_slice);
             // bytes_processed
             var bp_c_int: c_int = 0;
@@ -157,8 +159,9 @@ pub const rdp_session_t = struct
             }
             else
             {
-                std.debug.print("{s}: rdpc_process_server_data error {}\n",
-                        .{@src().fn_name, rv});
+                try log.logln(log.LogLevel.debug, @src(),
+                        "rdpc_process_server_data error {}",
+                        .{rv});
                 return;
             }
         }
@@ -170,13 +173,14 @@ pub const rdp_session_t = struct
         if (!self.connected)
         {
             self.connected = true;
-            std.debug.print("{s}: connected set\n", .{@src().fn_name});
+            try log.logln(log.LogLevel.debug, @src(), "connected set", .{});
             // connected complete, lets start
             const rv = c.rdpc_start(self.rdpc);
             if (rv != c.LIBRDPC_ERROR_NONE)
             {
-                std.debug.print("{s}: rdpc_start failed error {}\n",
-                        .{@src().fn_name, rv});
+                try log.logln(log.LogLevel.debug,
+                        @src(), "rdpc_start failed error {}",
+                        .{rv});
                 return;
             }
         }
@@ -187,8 +191,8 @@ pub const rdp_session_t = struct
             send.sent += try posix.send(self.sck, slice, 0);
             if (send.sent >= send.out_data_slice.len)
             {
-                std.debug.print("{s}: hexdump len {}\n",
-                        .{@src().fn_name, send.out_data_slice.len});
+                try log.logln(log.LogLevel.debug, @src(), "hexdump len {}",
+                        .{send.out_data_slice.len});
                 try hexdump.printHexDump(0, send.out_data_slice);
                 self.send_head = send.next;
                 if (self.send_head == null)
@@ -211,7 +215,7 @@ pub const rdp_session_t = struct
         var poll_count: usize = undefined;
         while (true)
         {
-            std.debug.print("{s}: loop\n", .{@src().fn_name});
+            try log.logln(log.LogLevel.debug, @src(), "loop", .{});
             poll_count = 0;
             polls[poll_count].fd = self.sck;
             polls[poll_count].events = posix.POLL.IN;
@@ -233,8 +237,8 @@ pub const rdp_session_t = struct
             poll_count += 1;
             const active = polls[0..poll_count];
             const poll_rv = try posix.poll(active, -1);
-            std.debug.print("{s}: poll_rv {} revents {}\n",
-                    .{@src().fn_name, poll_rv, active[ssck_index].revents});
+            try log.logln(log.LogLevel.debug, @src(), "poll_rv {} revents {}",
+                    .{poll_rv, active[ssck_index].revents});
             if (poll_rv > 0)
             {
                 if ((active[ssck_index].revents & posix.POLL.IN) != 0)
@@ -247,9 +251,8 @@ pub const rdp_session_t = struct
                 }
                 if ((active[term_index].revents & posix.POLL.IN) != 0)
                 {
-                    std.debug.print("{s}: {s}\n",
-                            .{@src().fn_name,
-                            "term set shutting down"});
+                    try log.logln(log.LogLevel.debug, @src(), "{s}",
+                            .{"term set shutting down"});
                     break;
                 }
             }
@@ -260,7 +263,7 @@ pub const rdp_session_t = struct
     fn log_msg_slice(self: *rdp_session_t, msg: []u8) !void
     {
         _ = self;
-        std.debug.print("{s}: msg [{s}]\n", .{@src().fn_name, msg});
+        try log.logln(log.LogLevel.debug, @src(), "[{s}]", .{msg});
     }
 
 };
@@ -341,13 +344,15 @@ fn cb_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
                         lmsg[index] = amsg[index];
                         index += 1;
                     }
-                    try asession.log_msg_slice(lmsg);
+                    asession.log_msg_slice(lmsg) catch
+                        return c.LIBRDPC_ERROR_MEMORY;
                     return c.LIBRDPC_ERROR_NONE;
                 }
             }
         }
     }
-    std.debug.print("{s}: nil\n", .{@src().fn_name});
+    log.logln(log.LogLevel.debug, @src(), "nil", .{}) catch
+        return c.LIBRDPC_ERROR_MEMORY;
     return c.LIBRDPC_ERROR_NONE;
 }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("log.zig");
 const rdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
 const c = @cImport(
@@ -24,7 +25,7 @@ fn process_args(settings: *c.rdpc_settings_t) !void
     const count: usize = list.items.len;
     while (index < count)
     {
-        std.debug.print("{s}\n", .{list.items[index]});
+        try log.logln(log.LogLevel.info, @src(), "{s}", .{list.items[index]});
         index += 1;
     }
     settings.i1 = 3389;
@@ -78,6 +79,8 @@ fn cleanup_signals() void
 //*****************************************************************************
 pub fn main() !void
 {
+    try log.init(&g_allocator, log.LogLevel.debug);
+    defer log.deinit();
     try setup_signals();
     defer cleanup_signals();
     try rdpc_session.init();
