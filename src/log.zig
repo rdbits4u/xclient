@@ -28,6 +28,8 @@ const g_log_names = [_][]const u8
 var g_lv: LogLevel = LogLevel.debug;
 var g_allocator: *const std.mem.Allocator = undefined;
 var g_seconds_bias: i32 = 0;
+var g_bias_str: ?[]u8 = null;
+var g_name: ?[]u8 = null;
 
 const g_show_devel = false;
 
@@ -40,10 +42,16 @@ pub fn init(allocator: *const std.mem.Allocator, lv: LogLevel) !void
     if (result) |_|
     {
         // ok
+        const name = g_name orelse "UTC";
+        const bias_str = g_bias_str orelse "+0000";
+        try logln(LogLevel.info, @src(),
+                "logging init ok, time zone {s} {s}",
+                .{name, bias_str});
     }
     else |err|
     {
-        std.debug.print("init_timezone failed err {}\n", .{err});
+        try logln(LogLevel.err, @src(),
+                "init_timezone failed err {}", .{err});
     }
 }
 
@@ -55,22 +63,6 @@ fn file_exists(file_path: []const u8) bool
         return false;
     return true;
 }
-
-//*****************************************************************************
-// fn file_exists(file_path: [:0]const u8) bool
-// {
-//     var stat_buf: std.c.Stat = undefined;
-//     const result = std.c.stat(file_path, &stat_buf);
-//     if (result == 0)
-//     {
-//         const mode = stat_buf.mode & std.c.S.IFMT;
-//         if (std.c.S.IFREG == mode)
-//         {
-//             return true;
-//         }
-//     }
-//     return false;
-// }
 
 //*****************************************************************************
 fn init_timezone() !void
@@ -135,6 +127,10 @@ fn init_timezone() !void
         if (last) |alast|
         {
             g_seconds_bias = alast.timetype.offset;
+            g_name = try g_allocator.dupe(u8, alast.timetype.name());
+            const sign: u8 = if (g_seconds_bias < 0) '-' else '+';
+            g_bias_str = try std.fmt.allocPrint(g_allocator.*, "{c}{d:0>4.0}",
+                    .{sign, @abs(@divTrunc(g_seconds_bias, 36))});
         }
     }
 }
@@ -142,13 +138,23 @@ fn init_timezone() !void
 //*****************************************************************************
 pub fn deinit() void
 {
+    if (g_name) |aname|
+    {
+        g_allocator.free(aname);
+        g_name = null;
+    }
+    if (g_bias_str) |abias_str|
+    {
+        g_allocator.free(abias_str);
+        g_bias_str = null;
+    }
 }
 
 //*****************************************************************************
 pub fn logln(lv: LogLevel, src: std.builtin.SourceLocation,
         comptime fmt: []const u8, args: anytype) !void
 {
-    const format = "[{d:0>4.0}-{d:0>2.0}-{d:0>2.0}T{d:0>2.0}:{d:0>2.0}:{d:0>2.0}.{d:0>3.0}{c}{d:0>4.0}] [{s: <7.0}] {s}: {s}\n";
+    const format = "[{d:0>4.0}-{d:0>2.0}-{d:0>2.0}T{d:0>2.0}:{d:0>2.0}:{d:0>2.0}.{d:0>3.0}{s}] [{s: <7.0}] {s}: {s}\n";
     const lv_int = @intFromEnum(lv);
     if (lv_int <= @intFromEnum(g_lv))
     {
@@ -159,11 +165,10 @@ pub fn logln(lv: LogLevel, src: std.builtin.SourceLocation,
         const now = std.time.milliTimestamp();
         fromMilliTimestamp(now + g_seconds_bias * 1000, &dt);
         const log_name = g_log_names[lv_int];
-        const sign: u8 = if (g_seconds_bias < 0) '-' else '+';
+        const bias_str = g_bias_str orelse "+0000";
         try writer.print(format,
                 .{dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second,
-                dt.millisecond, sign, @abs(@divTrunc(g_seconds_bias, 36)),
-                log_name, src.fn_name, alloc_buf});
+                dt.millisecond, bias_str, log_name, src.fn_name, alloc_buf});
     }
 }
 
