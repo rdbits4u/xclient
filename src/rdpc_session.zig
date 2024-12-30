@@ -41,6 +41,15 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    pub fn logln(self: *rdp_session_t, lv: log.LogLevel,
+            src: std.builtin.SourceLocation,
+            comptime fmt: []const u8, args: anytype) !void
+    {
+        _ = self;
+        try log.logln(lv, src, fmt, args);
+    }
+
+    //*************************************************************************
     // data to the rdp server
     fn send_slice_to_server(self: *rdp_session_t, data: []u8) !void
     {
@@ -49,7 +58,7 @@ pub const rdp_session_t = struct
         const result = posix.send(self.sck, slice, 0);
         if (result) |aresult|
         {
-            try log.logln(log.LogLevel.debug, @src(), "hexdump len {}",
+            try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
                     .{aresult});
             try hexdump.printHexDump(0, slice[0..aresult]);
             if (aresult >= slice.len)
@@ -117,10 +126,10 @@ pub const rdp_session_t = struct
     // data from the rdp server
     fn read_process_server_data(self: *rdp_session_t) !void
     {
-        try log.logln(log.LogLevel.debug, @src(), "server sck is set", .{});
+        try self.logln(log.LogLevel.debug, @src(), "server sck is set", .{});
         const recv_slice = self.in_data_slice[self.recv_start..];
         const recv_rv = try posix.recv(self.sck, recv_slice, 0);
-        try log.logln(log.LogLevel.debug, @src(), "recv_rv {} recv_start {}",
+        try self.logln(log.LogLevel.debug, @src(), "recv_rv {} recv_start {}",
                 .{recv_rv, self.recv_start});
         if (recv_rv > 0)
         {
@@ -130,7 +139,7 @@ pub const rdp_session_t = struct
             }
             const end = self.recv_start + recv_rv;
             const server_data_slice = self.in_data_slice[0..end];
-            try log.logln(log.LogLevel.debug, @src(), "hexdump len {}",
+            try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
                     .{server_data_slice.len});
             try hexdump.printHexDump(0, server_data_slice);
             // bytes_processed
@@ -159,7 +168,7 @@ pub const rdp_session_t = struct
             }
             else
             {
-                try log.logln(log.LogLevel.debug, @src(),
+                try self.logln(log.LogLevel.debug, @src(),
                         "rdpc_process_server_data error {}",
                         .{rv});
                 return;
@@ -173,12 +182,12 @@ pub const rdp_session_t = struct
         if (!self.connected)
         {
             self.connected = true;
-            try log.logln(log.LogLevel.debug, @src(), "connected set", .{});
+            try self.logln(log.LogLevel.debug, @src(), "connected set", .{});
             // connected complete, lets start
             const rv = c.rdpc_start(self.rdpc);
             if (rv != c.LIBRDPC_ERROR_NONE)
             {
-                try log.logln(log.LogLevel.debug,
+                try self.logln(log.LogLevel.debug,
                         @src(), "rdpc_start failed error {}",
                         .{rv});
                 return;
@@ -191,7 +200,7 @@ pub const rdp_session_t = struct
             send.sent += try posix.send(self.sck, slice, 0);
             if (send.sent >= send.out_data_slice.len)
             {
-                try log.logln(log.LogLevel.debug, @src(), "hexdump len {}",
+                try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
                         .{send.out_data_slice.len});
                 try hexdump.printHexDump(0, send.out_data_slice);
                 self.send_head = send.next;
@@ -215,7 +224,7 @@ pub const rdp_session_t = struct
         var poll_count: usize = undefined;
         while (true)
         {
-            try log.logln(log.LogLevel.debug, @src(), "loop", .{});
+            try self.logln(log.LogLevel.debug, @src(), "loop", .{});
             poll_count = 0;
             polls[poll_count].fd = self.sck;
             polls[poll_count].events = posix.POLL.IN;
@@ -237,7 +246,7 @@ pub const rdp_session_t = struct
             poll_count += 1;
             const active = polls[0..poll_count];
             const poll_rv = try posix.poll(active, -1);
-            try log.logln(log.LogLevel.debug, @src(), "poll_rv {} revents {}",
+            try self.logln(log.LogLevel.debug, @src(), "poll_rv {} revents {}",
                     .{poll_rv, active[ssck_index].revents});
             if (poll_rv > 0)
             {
@@ -251,7 +260,7 @@ pub const rdp_session_t = struct
                 }
                 if ((active[term_index].revents & posix.POLL.IN) != 0)
                 {
-                    try log.logln(log.LogLevel.debug, @src(), "{s}",
+                    try self.logln(log.LogLevel.debug, @src(), "{s}",
                             .{"term set shutting down"});
                     break;
                 }
@@ -262,8 +271,7 @@ pub const rdp_session_t = struct
     //*************************************************************************
     fn log_msg_slice(self: *rdp_session_t, msg: []u8) !void
     {
-        _ = self;
-        try log.logln(log.LogLevel.debug, @src(), "[{s}]", .{msg});
+        try self.logln(log.LogLevel.debug, @src(), "[{s}]", .{msg});
     }
 
 };

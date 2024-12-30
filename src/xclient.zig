@@ -25,7 +25,8 @@ fn process_args(settings: *c.rdpc_settings_t) !void
     const count: usize = list.items.len;
     while (index < count)
     {
-        try log.logln(log.LogLevel.info, @src(), "{s}", .{list.items[index]});
+        try log.logln(log.LogLevel.info, @src(), "{s}",
+                .{list.items[index]});
         index += 1;
     }
     settings.i1 = 3389;

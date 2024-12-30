@@ -48,20 +48,29 @@ pub fn init(allocator: *const std.mem.Allocator, lv: LogLevel) !void
 }
 
 //*****************************************************************************
-fn file_exists(file_path: [:0]const u8) bool
+fn file_exists(file_path: []const u8) bool
 {
-    var stat_buf: std.c.Stat = undefined;
-    const result = std.c.stat(file_path, &stat_buf);
-    if (result == 0)
-    {
-        const mode = stat_buf.mode & std.c.S.IFMT;
-        if (std.c.S.IFREG == mode)
-        {
-            return true;
-        }
-    }
-    return false;
+    const mode = std.posix.F_OK;
+    std.posix.access(file_path, mode) catch
+        return false;
+    return true;
 }
+
+//*****************************************************************************
+// fn file_exists(file_path: [:0]const u8) bool
+// {
+//     var stat_buf: std.c.Stat = undefined;
+//     const result = std.c.stat(file_path, &stat_buf);
+//     if (result == 0)
+//     {
+//         const mode = stat_buf.mode & std.c.S.IFMT;
+//         if (std.c.S.IFREG == mode)
+//         {
+//             return true;
+//         }
+//     }
+//     return false;
+// }
 
 //*****************************************************************************
 fn init_timezone() !void
