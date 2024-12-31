@@ -13,7 +13,7 @@ pub const LogLevel = enum(u8)
     never,
 };
 
-const g_log_names = [_][]const u8
+const g_log_lv_names = [_][]const u8
 {
     "ALLWAYS",
     "ERROR",
@@ -28,8 +28,10 @@ const g_log_names = [_][]const u8
 var g_lv: LogLevel = LogLevel.debug;
 var g_allocator: *const std.mem.Allocator = undefined;
 var g_seconds_bias: i32 = 0;
-var g_bias_str: ?[]u8 = null;
-var g_name: ?[]u8 = null;
+var g_bias_str: [8:0]u8 = .{'+', '0', '0', '0', '0', 0, 0, 0};
+var g_name: [8:0] u8 = .{'U', 'T', 'C', 0, 0, 0, 0, 0};
+
+const g_max_name_len = 6; // size of std.tz.Timetype.name_data
 
 const g_show_devel = false;
 
@@ -42,11 +44,9 @@ pub fn init(allocator: *const std.mem.Allocator, lv: LogLevel) !void
     if (result) |_|
     {
         // ok
-        const name = g_name orelse "UTC";
-        const bias_str = g_bias_str orelse "+0000";
         try logln(LogLevel.info, @src(),
                 "logging init ok, time zone {s} {s}",
-                .{name, bias_str});
+                .{g_name, g_bias_str});
     }
     else |err|
     {
@@ -127,9 +127,18 @@ fn init_timezone() !void
         if (last) |alast|
         {
             g_seconds_bias = alast.timetype.offset;
-            g_name = try g_allocator.dupe(u8, alast.timetype.name());
+            const name = alast.timetype.name();
+            var index: usize = 0;
+            while (index < g_max_name_len) : (index += 1)
+            {
+                g_name[index] = name[index];
+                if (g_name[index] == 0)
+                {
+                    break;
+                }
+            }
             const sign: u8 = if (g_seconds_bias < 0) '-' else '+';
-            g_bias_str = try std.fmt.allocPrint(g_allocator.*, "{c}{d:0>4.0}",
+            _ = try std.fmt.bufPrint(&g_bias_str, "{c}{d:0>4.0}",
                     .{sign, @abs(@divTrunc(g_seconds_bias, 36))});
         }
     }
@@ -138,37 +147,38 @@ fn init_timezone() !void
 //*****************************************************************************
 pub fn deinit() void
 {
-    if (g_name) |aname|
-    {
-        g_allocator.free(aname);
-        g_name = null;
-    }
-    if (g_bias_str) |abias_str|
-    {
-        g_allocator.free(abias_str);
-        g_bias_str = null;
-    }
 }
 
 //*****************************************************************************
 pub fn logln(lv: LogLevel, src: std.builtin.SourceLocation,
         comptime fmt: []const u8, args: anytype) !void
 {
-    const format = "[{d:0>4.0}-{d:0>2.0}-{d:0>2.0}T{d:0>2.0}:{d:0>2.0}:{d:0>2.0}.{d:0>3.0}{s}] [{s: <7.0}] {s}: {s}\n";
     const lv_int = @intFromEnum(lv);
     if (lv_int <= @intFromEnum(g_lv))
     {
-        const alloc_buf = try std.fmt.allocPrint(g_allocator.*, fmt, args);
-        defer g_allocator.free(alloc_buf);
+        const msg_buf = try std.fmt.allocPrint(g_allocator.*,
+                fmt, args);
+        defer g_allocator.free(msg_buf);
         var dt: DateTime = undefined;
         // time in milliseconds
         const now = std.time.milliTimestamp();
         fromMilliTimestamp(now + g_seconds_bias * 1000, &dt);
-        const log_name = g_log_names[lv_int];
-        const bias_str = g_bias_str orelse "+0000";
-        try writer.print(format,
-                .{dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second,
-                dt.millisecond, bias_str, log_name, src.fn_name, alloc_buf});
+        // date
+        const date_buf = try std.fmt.allocPrint(g_allocator.*,
+                // year      month     day
+                "{d:0>4.0}-{d:0>2.0}-{d:0>2.0}",
+                .{dt.year, dt.month, dt.day});
+        defer g_allocator.free(date_buf);
+        // time
+        const time_buf = try std.fmt.allocPrint(g_allocator.*,
+                // hour      minute    second    milliseconds
+                "{d:0>2.0}:{d:0>2.0}:{d:0>2.0}.{d:0>3.0}",
+                .{dt.hour, dt.minute, dt.second, dt.millisecond});
+        defer g_allocator.free(time_buf);
+        const log_lv_name = g_log_lv_names[lv_int];
+        try writer.print("[{s}T{s}{s}] [{s: <7.0}] {s}: {s}\n",
+                .{date_buf, time_buf, g_bias_str,
+                log_lv_name, src.fn_name, msg_buf});
     }
 }
 
