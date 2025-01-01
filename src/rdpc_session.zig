@@ -102,17 +102,24 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    pub fn connect(self: *rdp_session_t) !void
+    pub fn connect(self: *rdp_session_t, server: [] const u8,
+            port: [] const u8) !void
     {
-        const server = "127.0.0.1";
-        const port = 3389;
-        try self.logln(log.LogLevel.info, @src(), "connecting to {s} {}",
+        try self.logln(log.LogLevel.info, @src(), "connecting to {s} {s}",
                 .{server, port});
-        const address = try net.Address.parseIp(server, port);
-        //const address = try net.Address.parseIp("205.5.60.19", 3389);
+        var address: net.Address = undefined;
         const tpe: u32 = posix.SOCK.STREAM;
-        const protocol = posix.IPPROTO.TCP;
-        self.sck = try posix.socket(address.any.family, tpe, protocol);
+        if (port[0] == '/')
+        {
+            address = try net.Address.initUnix(port);
+            self.sck = try posix.socket(address.any.family, tpe, 0);
+        }
+        else
+        {
+            const port_u16: u16 = try std.fmt.parseInt(u16, port, 10);
+            address = try net.Address.parseIp(server, port_u16);
+            self.sck = try posix.socket(address.any.family, tpe, 0);
+        }
         // set non blocking
         var val1 = try posix.fcntl(self.sck, posix.F.GETFL, 0);
         if ((val1 & posix.SOCK.NONBLOCK) == 0)
