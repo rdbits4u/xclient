@@ -172,15 +172,16 @@ pub const rdp_session_t = struct
             if (rv == c.LIBRDPC_ERROR_NONE)
             {
                 const bp_u32: u32 = @bitCast(bp_c_int);
+                try self.logln(log.LogLevel.debug, @src(),
+                        "bp_u32 {} recv_rv {}",
+                        .{bp_u32, recv_rv});
                 // copy any left over data up to front of in_data_slice
                 const slice = self.in_data_slice;
-                var start: u32 = 0;
-                while (bp_u32 + start < recv_rv)
+                for (bp_u32..recv_rv) |index|
                 {
-                    slice[start] = slice[bp_u32 + start];
-                    start += 1;
+                    slice[index - bp_u32] = slice[index];
                 }
-                self.recv_start = start;
+                self.recv_start = recv_rv - bp_u32;
             }
             else if (rv == c.LIBRDPC_ERROR_NEED_MORE)
             {
@@ -191,8 +192,12 @@ pub const rdp_session_t = struct
                 try self.logln(log.LogLevel.debug, @src(),
                         "rdpc_process_server_data error {}",
                         .{rv});
-                return;
+                return error.Unexpected;
             }
+        }
+        else
+        {
+            return error.Disconnected;
         }
     }
 
@@ -210,29 +215,37 @@ pub const rdp_session_t = struct
                 try self.logln(log.LogLevel.err,
                         @src(), "rdpc_start failed error {}",
                         .{rv});
-                return;
+                return error.StartFailed;
             }
         }
         if (self.send_head) |asend_head|
         {
             const send = asend_head;
             const slice = send.out_data_slice[send.sent..];
-            send.sent += try posix.send(self.sck, slice, 0);
-            if (send.sent >= send.out_data_slice.len)
+            const sent = try posix.send(self.sck, slice, 0);
+            if (sent > 0)
             {
-                try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
-                        .{send.out_data_slice.len});
-                try hexdump.printHexDump(0, send.out_data_slice);
-                self.send_head = send.next;
-                if (self.send_head == null)
+                send.sent += sent;
+                if (send.sent >= send.out_data_slice.len)
                 {
-                    // if send_head is null, set send_tail to null
-                    self.send_tail = null;
+                    try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
+                            .{send.out_data_slice.len});
+                    try hexdump.printHexDump(0, send.out_data_slice);
+                    self.send_head = send.next;
+                    if (self.send_head == null)
+                    {
+                        // if send_head is null, set send_tail to null
+                        self.send_tail = null;
+                    }
+                    self.allocator.free(send.out_data_slice);
+                    self.allocator.destroy(send);
                 }
-                self.allocator.free(send.out_data_slice);
-                self.allocator.destroy(send);
             }
-        }                    
+            else
+            {
+                return error.Disconnected;
+            }
+        }
     }
 
     //*************************************************************************

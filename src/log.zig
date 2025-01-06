@@ -227,7 +227,8 @@ fn fromMilliTimestamp(mst: i64, dt: *DateTime) void
     day_n -= DAYS_PER_YEAR * temp + temp / 4;
 
     var month: u8 = @intCast((5 * day_n + 2) / 153);
-    const day: u8 = @intCast(day_n - (@as(u64, @intCast(month)) * 153 + 2) / 5 + 1);
+    const day: u8 =
+            @intCast(day_n - (@as(u64, @intCast(month)) * 153 + 2) / 5 + 1);
 
     month += 3;
     if (month > 12)

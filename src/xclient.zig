@@ -88,7 +88,6 @@ pub fn main() !void
     defer rdpc_session.deinit();
     const session = try create_rdpc_session();
     defer session.delete();
-    try session.connect("127.0.0.1", "3390");
-    //try session.connect("", "/tmp/.X11-unix/X0");
+    try session.connect("205.5.60.2", "3389");
     try session.loop();
 }
