@@ -12,6 +12,16 @@ var g_allocator: std.mem.Allocator = std.heap.c_allocator;
 //*****************************************************************************
 fn process_args(settings: *c.rdpc_settings_t) !void
 {
+    settings.width = 800;
+    settings.height = 600;
+    settings.dpix = 96;
+    settings.dpiy = 96;
+    settings.keyboard_layout = 0x0409;
+    settings.cliprdr = 1;
+    settings.rdpsnd = 1;
+    settings.rail = 1;
+    settings.rdpdr = 1;
+
     const arg_iterator = std.process.ArgIterator;
     var args_iterator = try arg_iterator.initWithAllocator(g_allocator);
     defer args_iterator.deinit();
@@ -23,13 +33,11 @@ fn process_args(settings: *c.rdpc_settings_t) !void
     }
     var index: usize = 0;
     const count: usize = list.items.len;
-    while (index < count)
+    while (index < count) : (index += 1)
     {
         try log.logln(log.LogLevel.info, @src(), "{s}",
                 .{list.items[index]});
-        index += 1;
     }
-    settings.i1 = 3389;
 }
 
 //*****************************************************************************
