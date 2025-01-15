@@ -21,6 +21,7 @@ fn process_args(settings: *c.rdpc_settings_t) !void
     settings.rdpsnd = 1;
     settings.rail = 1;
     settings.rdpdr = 1;
+    @memcpy(settings.username[0..3], "jay");
 
     const arg_iterator = std.process.ArgIterator;
     var args_iterator = try arg_iterator.initWithAllocator(g_allocator);
