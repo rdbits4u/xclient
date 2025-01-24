@@ -1,4 +1,5 @@
 const std = @import("std");
+const hexdump = @import("hexdump");
 const log = @import("log.zig");
 const rdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
@@ -10,8 +11,33 @@ const c = @cImport(
 var g_allocator: std.mem.Allocator = std.heap.c_allocator;
 
 //*****************************************************************************
-fn process_args(settings: *c.rdpc_settings_t) !void
+fn show_command_line_args() !void
 {
+    std.debug.print("show_command_line_args\n", .{});
+}
+
+//*****************************************************************************
+// copy slice to slice but make sure dst has a nil at end
+fn copyZ(dst: []u8, src: []const u8) void
+{
+    if (dst.len < 1)
+    {
+        return;
+    }
+    var index: usize = 0;
+    while ((index < src.len) and (index + 1 < dst.len)) : (index += 1)
+    {
+        dst[index] = src[index];
+    }
+    dst[index] = 0;
+}
+
+//*****************************************************************************
+fn process_args(settings: *c.rdpc_settings_t,
+        rdp_connect: *rdpc_session.rdp_connect_t) !void
+{
+    copyZ(&rdp_connect.server_name, "205.5.60.2");
+    copyZ(&rdp_connect.server_port, "3389");
     settings.width = 800;
     settings.height = 600;
     settings.dpix = 96;
@@ -21,35 +47,117 @@ fn process_args(settings: *c.rdpc_settings_t) !void
     settings.rdpsnd = 1;
     settings.rail = 1;
     settings.rdpdr = 1;
-    @memcpy(settings.username[0..3], "jay");
-
-    const arg_iterator = std.process.ArgIterator;
-    var args_iterator = try arg_iterator.initWithAllocator(g_allocator);
-    defer args_iterator.deinit();
-    var list = std.ArrayList([]const u8).init(g_allocator);
-    defer list.deinit();
-    while (args_iterator.next()) |item|
+    if (std.posix.getenv("USER")) |auser_env|
     {
-        try list.append(item);
+        copyZ(&settings.username, auser_env);
     }
+    var hostname_buf: [64]u8 = undefined;
+    const hostname = try std.posix.gethostname(&hostname_buf);
+    copyZ(&settings.clientname, hostname);
+    // process command line args
+    var slice_arg: []u8 = undefined;
     var index: usize = 0;
-    const count: usize = list.items.len;
+    const count = std.os.argv.len;
     while (index < count) : (index += 1)
     {
-        try log.logln(log.LogLevel.info, @src(), "{s}",
-                .{list.items[index]});
+        slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+        try log.logln(log.LogLevel.info, @src(), "{} {} {s}",
+                .{index, count, slice_arg});
+        if (std.mem.eql(u8, slice_arg, "-u"))
+        {
+            if (index + 1 >= count)
+            {
+                return error.ShowCommandLine;
+            }
+            index += 1;
+            slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+            try log.logln(log.LogLevel.info, @src(), "{} {} {s}",
+                    .{index, count, slice_arg});
+            copyZ(&settings.username, slice_arg);
+            try hexdump.printHexDump(0, &settings.username);
+        }
+        else if (std.mem.eql(u8, slice_arg, "-d"))
+        {
+            if (index + 1 >= count)
+            {
+                return error.ShowCommandLine;
+            }
+            index += 1;
+            slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+            copyZ(&settings.domain, slice_arg);
+        }
+        else if (std.mem.eql(u8, slice_arg, "-s"))
+        {
+            if (index + 1 >= count)
+            {
+                return error.ShowCommandLine;
+            }
+            index += 1;
+            slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+            copyZ(&settings.altshell, slice_arg);
+        }
+        else if (std.mem.eql(u8, slice_arg, "-c"))
+        {
+            if (index + 1 >= count)
+            {
+                return error.ShowCommandLine;
+            }
+            index += 1;
+            slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+            copyZ(&settings.workingdir, slice_arg);
+        }
+        else if (std.mem.eql(u8, slice_arg, "-p"))
+        {
+            if (index + 1 >= count)
+            {
+                return error.ShowCommandLine;
+            }
+            index += 1;
+            slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+            copyZ(&settings.password, slice_arg);
+        }
+        else if (std.mem.eql(u8, slice_arg, "-n"))
+        {
+            if (index + 1 >= count)
+            {
+                return error.ShowCommandLine;
+            }
+            index += 1;
+            slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+            copyZ(&settings.clientname, slice_arg);
+        }
     }
+    // print summary
+    try log.logln(log.LogLevel.info, @src(), "domain [{s}]",
+            .{std.mem.sliceTo(&settings.domain, 0)});
+    try log.logln(log.LogLevel.info, @src(), "username [{s}]",
+            .{std.mem.sliceTo(&settings.username, 0)});
+    try log.logln(log.LogLevel.info, @src(), "altshell [{s}]",
+            .{std.mem.sliceTo(&settings.altshell, 0)});
+    try log.logln(log.LogLevel.info, @src(), "workingdir [{s}]",
+            .{std.mem.sliceTo(&settings.workingdir, 0)});
+    try log.logln(log.LogLevel.info, @src(), "hostname [{s}]",
+            .{std.mem.sliceTo(&settings.clientname, 0)});
 }
 
 //*****************************************************************************
-fn create_rdpc_session() !*rdpc_session.rdp_session_t
+fn create_rdpc_session(rdp_connect: *rdpc_session.rdp_connect_t)
+        !*rdpc_session.rdp_session_t
 {
-    const settings: *c.rdpc_settings_t =
-            try g_allocator.create(c.rdpc_settings_t);
+    const settings: *c.struct_rdpc_settings_t =
+            try g_allocator.create(c.struct_rdpc_settings_t);
     defer g_allocator.destroy(settings);
     settings.* = .{};
-    try process_args(settings);
-    return try rdpc_session.create(&g_allocator, settings);
+    const result = process_args(settings, rdp_connect);
+    if (result) |_| { } else |err|
+    {
+        if (err == error.ShowCommandLine)
+        {
+            try show_command_line_args();
+        }
+        return err;
+    }
+    return try rdpc_session.create(&g_allocator, settings, rdp_connect);
 }
 
 //*****************************************************************************
@@ -95,8 +203,12 @@ pub fn main() !void
     defer cleanup_signals();
     try rdpc_session.init();
     defer rdpc_session.deinit();
-    const session = try create_rdpc_session();
+    const rdp_connect: *rdpc_session.rdp_connect_t =
+            try g_allocator.create(rdpc_session.rdp_connect_t);
+    defer g_allocator.destroy(rdp_connect);
+    rdp_connect.* = .{};
+    const session = try create_rdpc_session(rdp_connect);
     defer session.delete();
-    try session.connect("205.5.60.2", "3389");
+    try session.connect();
     try session.loop();
 }

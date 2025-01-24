@@ -1,5 +1,4 @@
 const std = @import("std");
-const hexdump = @import("hexdump");
 const log = @import("log.zig");
 const net = std.net;
 const posix = std.posix;
@@ -18,6 +17,12 @@ const send_t = struct
     next: ?*send_t = null,
 };
 
+pub const rdp_connect_t = struct
+{
+    server_name: [512]u8 = undefined,
+    server_port: [64]u8 = undefined,
+};
+
 pub const rdp_session_t = struct
 {
     allocator: *const std.mem.Allocator = undefined,
@@ -28,6 +33,7 @@ pub const rdp_session_t = struct
     in_data_slice: []u8 = undefined,
     send_head: ?*send_t = null,
     send_tail: ?*send_t = null,
+    rdp_connect: *rdp_connect_t = undefined,
 
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
@@ -67,9 +73,6 @@ pub const rdp_session_t = struct
         const result = posix.send(self.sck, slice, 0);
         if (result) |aresult|
         {
-            try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
-                    .{aresult});
-            try hexdump.printHexDump(0, slice[0..aresult]);
             if (aresult >= slice.len)
             {
                 // all sent, ok
@@ -88,7 +91,7 @@ pub const rdp_session_t = struct
         const send: *send_t = try self.allocator.create(send_t);
         send.* = .{};
         send.out_data_slice = try self.allocator.alloc(u8, slice.len);
-        @memcpy(send.out_data_slice, slice);
+        std.mem.copyForwards(u8, send.out_data_slice, slice);
         if (self.send_tail) |asend_tail|
         {
             asend_tail.next = send;
@@ -102,9 +105,10 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    pub fn connect(self: *rdp_session_t, server: [] const u8,
-            port: [] const u8) !void
+    pub fn connect(self: *rdp_session_t) !void
     {
+        const server = std.mem.sliceTo(&self.rdp_connect.server_name, 0);
+        const port = std.mem.sliceTo(&self.rdp_connect.server_port, 0);
         try self.logln(log.LogLevel.info, @src(), "connecting to {s} {s}",
                 .{server, port});
         var address: net.Address = undefined;
@@ -130,11 +134,9 @@ pub const rdp_session_t = struct
         // connect
         const result = posix.connect(self.sck, &address.any,
                 @sizeOf(net.Address));
-        if (result) |_|
-        { // no error
-        }
-        else |err|
+        if (result) |_| { } else |err|
         {
+            // WouldBlock is ok
             if (err != error.WouldBlock)
             {
                 return err;
@@ -157,42 +159,41 @@ pub const rdp_session_t = struct
             {
                 return error.Unexpected;
             }
-            const end = self.recv_start + recv_rv;
-            const server_data_slice = self.in_data_slice[0..end];
-            try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
-                    .{server_data_slice.len});
-            try hexdump.printHexDump(0, server_data_slice);
-            // bytes_processed
-            var bp_c_int: c_int = 0;
-            // bytes_in_buf
-            const bib_u32: u32 = @truncate(server_data_slice.len);
-            const bib_c_int: c_int = @bitCast(bib_u32);
-            const rv = c.rdpc_process_server_data(self.rdpc,
-                    server_data_slice.ptr, bib_c_int, &bp_c_int);
-            if (rv == c.LIBRDPC_ERROR_NONE)
+            var end = self.recv_start + recv_rv;
+            while (end > 0)
             {
-                const bp_u32: u32 = @bitCast(bp_c_int);
-                try self.logln(log.LogLevel.debug, @src(),
-                        "bp_u32 {} recv_rv {}",
-                        .{bp_u32, recv_rv});
-                // copy any left over data up to front of in_data_slice
-                const slice = self.in_data_slice;
-                for (bp_u32..recv_rv) |index|
+                const server_data_slice = self.in_data_slice[0..end];
+                // bytes_processed
+                var bp_c_int: c_int = 0;
+                // bytes_in_buf
+                const bib_u32: u32 = @truncate(server_data_slice.len);
+                const bib_c_int: c_int = @bitCast(bib_u32);
+                const rv = c.rdpc_process_server_data(self.rdpc,
+                        server_data_slice.ptr, bib_c_int, &bp_c_int);
+                if (rv == c.LIBRDPC_ERROR_NONE)
                 {
-                    slice[index - bp_u32] = slice[index];
+                    const bp_u32: u32 = @bitCast(bp_c_int);
+                    // copy any left over data up to front of in_data_slice
+                    const slice = self.in_data_slice;
+                    for (bp_u32..end) |index|
+                    {
+                        slice[index - bp_u32] = slice[index];
+                    }
+                    end -= bp_u32;
+                    self.recv_start = end;
                 }
-                self.recv_start = recv_rv - bp_u32;
-            }
-            else if (rv == c.LIBRDPC_ERROR_NEED_MORE)
-            {
-                self.recv_start = recv_rv;
-            }
-            else
-            {
-                try self.logln(log.LogLevel.debug, @src(),
-                        "rdpc_process_server_data error {}",
-                        .{rv});
-                return error.Unexpected;
+                else if (rv == c.LIBRDPC_ERROR_NEED_MORE)
+                {
+                    self.recv_start = end;
+                    break;
+                }
+                else
+                {
+                    try self.logln(log.LogLevel.debug, @src(),
+                            "rdpc_process_server_data error {}",
+                            .{rv});
+                    return error.Unexpected;
+                }
             }
         }
         else
@@ -228,9 +229,6 @@ pub const rdp_session_t = struct
                 send.sent += sent;
                 if (send.sent >= send.out_data_slice.len)
                 {
-                    try self.logln(log.LogLevel.debug, @src(), "hexdump len {}",
-                            .{send.out_data_slice.len});
-                    try hexdump.printHexDump(0, send.out_data_slice);
                     self.send_head = send.next;
                     if (self.send_head == null)
                     {
@@ -312,12 +310,14 @@ pub const rdp_session_t = struct
 
 //*****************************************************************************
 pub fn create(allocator: *const std.mem.Allocator,
-        settings: *c.rdpc_settings_t) !*rdp_session_t
+        settings: *c.rdpc_settings_t,
+        rdp_connect: *rdp_connect_t) !*rdp_session_t
 {
     const self: *rdp_session_t = try allocator.create(rdp_session_t);
     errdefer allocator.destroy(self);
     self.* = .{};
     self.allocator = allocator;
+    self.rdp_connect = rdp_connect;
     var rdpc: ?*c.rdpc_t = null;
     const rv = c.rdpc_create(settings, &rdpc);
     if (rv == c.LIBRDPC_ERROR_NONE)
