@@ -1,5 +1,6 @@
 const std = @import("std");
 const hexdump = @import("hexdump");
+const strings = @import("strings");
 const log = @import("log.zig");
 const rdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
@@ -17,27 +18,12 @@ fn show_command_line_args() !void
 }
 
 //*****************************************************************************
-// copy slice to slice but make sure dst has a nil at end
-fn copyZ(dst: []u8, src: []const u8) void
-{
-    if (dst.len < 1)
-    {
-        return;
-    }
-    var index: usize = 0;
-    while ((index < src.len) and (index + 1 < dst.len)) : (index += 1)
-    {
-        dst[index] = src[index];
-    }
-    dst[index] = 0;
-}
-
-//*****************************************************************************
 fn process_args(settings: *c.rdpc_settings_t,
         rdp_connect: *rdpc_session.rdp_connect_t) !void
 {
-    copyZ(&rdp_connect.server_name, "205.5.60.2");
-    copyZ(&rdp_connect.server_port, "3389");
+    // default some stuff
+    strings.copyZ(&rdp_connect.server_name, "205.5.60.2");
+    strings.copyZ(&rdp_connect.server_port, "3389");
     settings.width = 800;
     settings.height = 600;
     settings.dpix = 96;
@@ -47,13 +33,14 @@ fn process_args(settings: *c.rdpc_settings_t,
     settings.rdpsnd = 1;
     settings.rail = 1;
     settings.rdpdr = 1;
+    // get some info from os
     if (std.posix.getenv("USER")) |auser_env|
     {
-        copyZ(&settings.username, auser_env);
+        strings.copyZ(&settings.username, auser_env);
     }
-    var hostname_buf: [64]u8 = undefined;
+    var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
     const hostname = try std.posix.gethostname(&hostname_buf);
-    copyZ(&settings.clientname, hostname);
+    strings.copyZ(&settings.clientname, hostname);
     // process command line args
     var slice_arg: []u8 = undefined;
     var index: usize = 0;
@@ -73,7 +60,7 @@ fn process_args(settings: *c.rdpc_settings_t,
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
             try log.logln(log.LogLevel.info, @src(), "{} {} {s}",
                     .{index, count, slice_arg});
-            copyZ(&settings.username, slice_arg);
+            strings.copyZ(&settings.username, slice_arg);
             try hexdump.printHexDump(0, &settings.username);
         }
         else if (std.mem.eql(u8, slice_arg, "-d"))
@@ -84,7 +71,7 @@ fn process_args(settings: *c.rdpc_settings_t,
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
-            copyZ(&settings.domain, slice_arg);
+            strings.copyZ(&settings.domain, slice_arg);
         }
         else if (std.mem.eql(u8, slice_arg, "-s"))
         {
@@ -94,7 +81,7 @@ fn process_args(settings: *c.rdpc_settings_t,
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
-            copyZ(&settings.altshell, slice_arg);
+            strings.copyZ(&settings.altshell, slice_arg);
         }
         else if (std.mem.eql(u8, slice_arg, "-c"))
         {
@@ -104,7 +91,7 @@ fn process_args(settings: *c.rdpc_settings_t,
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
-            copyZ(&settings.workingdir, slice_arg);
+            strings.copyZ(&settings.workingdir, slice_arg);
         }
         else if (std.mem.eql(u8, slice_arg, "-p"))
         {
@@ -114,7 +101,7 @@ fn process_args(settings: *c.rdpc_settings_t,
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
-            copyZ(&settings.password, slice_arg);
+            strings.copyZ(&settings.password, slice_arg);
         }
         else if (std.mem.eql(u8, slice_arg, "-n"))
         {
@@ -124,7 +111,7 @@ fn process_args(settings: *c.rdpc_settings_t,
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
-            copyZ(&settings.clientname, slice_arg);
+            strings.copyZ(&settings.clientname, slice_arg);
         }
     }
     // print summary

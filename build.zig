@@ -20,5 +20,8 @@ pub fn build(b: *std.Build) void
     xclient.root_module.addImport("hexdump", b.createModule(.{
         .root_source_file = b.path("../common/hexdump.zig"),
     }));
+    xclient.root_module.addImport("strings", b.createModule(.{
+        .root_source_file = b.path("../common/strings.zig"),
+    }));
     b.installArtifact(xclient);
 }
