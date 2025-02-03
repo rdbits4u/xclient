@@ -24,5 +24,16 @@ pub fn build(b: *std.Build) void
     xclient.root_module.addImport("strings", b.createModule(.{
         .root_source_file = b.path("../common/strings.zig"),
     }));
+    setExtraLibraryPaths(xclient, target);
     b.installArtifact(xclient);
+}
+
+fn setExtraLibraryPaths(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void
+{
+    if (target.result.cpu.arch == std.Target.Cpu.Arch.x86)
+    {
+        // zig seems to use /usr/lib/x86-linux-gnu instead
+        // of /usr/lib/i386-linux-gnu
+        compile.addLibraryPath(.{.cwd_relative = "/usr/lib/i386-linux-gnu/"});
+    }
 }
