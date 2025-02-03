@@ -1,9 +1,11 @@
 const std = @import("std");
 const log = @import("log.zig");
+const rdpc_x11 = @import("rdpc_x11.zig");
 const net = std.net;
 const posix = std.posix;
 const c = @cImport(
 {
+    @cInclude("X11/Xlib.h");
     @cInclude("librdpc.h");
 });
 
@@ -19,8 +21,8 @@ const send_t = struct
 
 pub const rdp_connect_t = struct
 {
-    server_name: [512]u8 = undefined,
-    server_port: [64]u8 = undefined,
+    server_name: [512]u8 = std.mem.zeroes([512]u8),
+    server_port: [64]u8 = std.mem.zeroes([64]u8),
 };
 
 pub const rdp_session_t = struct
@@ -34,10 +36,12 @@ pub const rdp_session_t = struct
     send_head: ?*send_t = null,
     send_tail: ?*send_t = null,
     rdp_connect: *rdp_connect_t = undefined,
+    rdp_x11: *rdpc_x11.rdp_x11_t = undefined,
 
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
     {
+        self.rdp_x11.delete();
         _ = c.rdpc_delete(self.rdpc);
         if (self.sck != -1)
         {
@@ -109,8 +113,8 @@ pub const rdp_session_t = struct
     {
         const server = std.mem.sliceTo(&self.rdp_connect.server_name, 0);
         const port = std.mem.sliceTo(&self.rdp_connect.server_port, 0);
-        try self.logln(log.LogLevel.info, @src(), "connecting to {s} {s}",
-                .{server, port});
+//        try self.logln(log.LogLevel.info, @src(), "connecting to {s} {s}",
+//                .{server, port});
         var address: net.Address = undefined;
         const tpe: u32 = posix.SOCK.STREAM;
         if (port[0] == '/')
@@ -251,12 +255,24 @@ pub const rdp_session_t = struct
     {
         self.in_data_slice = try self.allocator.alloc(u8, 64 * 1024);
         defer self.allocator.free(self.in_data_slice);
-        var polls: [16]posix.pollfd = undefined;
+        const max_polls = 32;
+        const max_fds = 16;
+        var fds: [max_fds]i32 = undefined;
+        var timeout: i32 = undefined;
+        var polls: [max_polls]posix.pollfd = undefined;
         var poll_count: usize = undefined;
         while (true)
         {
             try self.logln_devel(log.LogLevel.debug, @src(), "loop", .{});
+            timeout = -1;
             poll_count = 0;
+            // setup terminate socket
+            polls[poll_count].fd = g_term[0];
+            polls[poll_count].events = posix.POLL.IN;
+            polls[poll_count].revents = 0;
+            const term_index = poll_count;
+            poll_count += 1;
+            // setup server socket
             polls[poll_count].fd = self.sck;
             polls[poll_count].events = posix.POLL.IN;
             if (!self.connected)
@@ -270,32 +286,41 @@ pub const rdp_session_t = struct
             polls[poll_count].revents = 0;
             const ssck_index = poll_count;
             poll_count += 1;
-            polls[poll_count].fd = g_term[0];
-            polls[poll_count].events = posix.POLL.IN;
-            polls[poll_count].revents = 0;
-            const term_index = poll_count;
-            poll_count += 1;
-            const active = polls[0..poll_count];
-            const poll_rv = try posix.poll(active, -1);
+            // setup x11 sockets
+            const active_fds = try self.rdp_x11.get_fds(&fds, &timeout);
+            for (active_fds) |fd|
+            {
+                polls[poll_count].fd = fd;
+                polls[poll_count].events = posix.POLL.IN;
+                polls[poll_count].revents = 0;
+                poll_count += 1;
+                if (poll_count >= max_polls)
+                {
+                    break;
+                }
+            }
+            const active_polls = polls[0..poll_count];
+            const poll_rv = try posix.poll(active_polls, timeout);
             try self.logln_devel(log.LogLevel.debug, @src(),
                     "poll_rv {} revents {}",
-                    .{poll_rv, active[ssck_index].revents});
+                    .{poll_rv, active_polls[ssck_index].revents});
             if (poll_rv > 0)
             {
-                if ((active[ssck_index].revents & posix.POLL.IN) != 0)
-                {
-                    try self.read_process_server_data();
-                }
-                if ((active[ssck_index].revents & posix.POLL.OUT) != 0)
-                {
-                    try self.process_write_server_data();
-                }
-                if ((active[term_index].revents & posix.POLL.IN) != 0)
+                if ((active_polls[term_index].revents & posix.POLL.IN) != 0)
                 {
                     try self.logln(log.LogLevel.info, @src(), "{s}",
                             .{"term set shutting down"});
                     break;
                 }
+                if ((active_polls[ssck_index].revents & posix.POLL.IN) != 0)
+                {
+                    try self.read_process_server_data();
+                }
+                if ((active_polls[ssck_index].revents & posix.POLL.OUT) != 0)
+                {
+                    try self.process_write_server_data();
+                }
+                try self.rdp_x11.check_fds();
             }
         }
     }
@@ -313,25 +338,33 @@ pub fn create(allocator: *const std.mem.Allocator,
         settings: *c.rdpc_settings_t,
         rdp_connect: *rdp_connect_t) !*rdp_session_t
 {
-    const self: *rdp_session_t = try allocator.create(rdp_session_t);
+    const self = try allocator.create(rdp_session_t);
     errdefer allocator.destroy(self);
-    self.* = .{};
+    self.* = std.mem.zeroInit(rdp_session_t, .{});
     self.allocator = allocator;
     self.rdp_connect = rdp_connect;
+    try self.logln(log.LogLevel.debug, @src(), "rdp_session_t", .{});
     var rdpc: ?*c.rdpc_t = null;
     const rv = c.rdpc_create(settings, &rdpc);
-    if (rv == c.LIBRDPC_ERROR_NONE)
+    errdefer _ = c.rdpc_delete(rdpc);
+    if (rv != c.LIBRDPC_ERROR_NONE)
     {
-        if (rdpc) |ardpc|
-        {
-            ardpc.user[0] = self;
-            ardpc.log_msg = cb_log_msg;
-            ardpc.send_to_server = cb_send_to_server;
-            self.rdpc = ardpc;
-            return self;
-        }
+        return error.OutOfMemory;
     }
-    return error.OutOfMemory;
+    if (rdpc) |ardpc|
+    {
+        ardpc.user[0] = self;
+        ardpc.log_msg = cb_log_msg;
+        ardpc.send_to_server = cb_send_to_server;
+        self.rdpc = ardpc;
+        self.rdp_x11 = try rdpc_x11.create(self, allocator, settings);
+        errdefer self.rdp_x11.delete();
+    }
+    else
+    {
+        return error.OutOfMemory;
+    }
+    return self;
 }
 
 //*****************************************************************************

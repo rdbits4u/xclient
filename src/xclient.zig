@@ -6,6 +6,7 @@ const rdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
 const c = @cImport(
 {
+    @cInclude("X11/Xlib.h");
     @cInclude("librdpc.h");
 });
 
@@ -38,7 +39,8 @@ fn process_args(settings: *c.rdpc_settings_t,
     {
         strings.copyZ(&settings.username, auser_env);
     }
-    var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    var hostname_buf: [std.posix.HOST_NAME_MAX]u8 =
+            std.mem.zeroes([std.posix.HOST_NAME_MAX]u8);
     const hostname = try std.posix.gethostname(&hostname_buf);
     strings.copyZ(&settings.clientname, hostname);
     // process command line args
@@ -131,10 +133,9 @@ fn process_args(settings: *c.rdpc_settings_t,
 fn create_rdpc_session(rdp_connect: *rdpc_session.rdp_connect_t)
         !*rdpc_session.rdp_session_t
 {
-    const settings: *c.struct_rdpc_settings_t =
-            try g_allocator.create(c.struct_rdpc_settings_t);
+    const settings = try g_allocator.create(c.struct_rdpc_settings_t);
     defer g_allocator.destroy(settings);
-    settings.* = .{};
+    settings.* = std.mem.zeroInit(c.struct_rdpc_settings_t, .{});
     const result = process_args(settings, rdp_connect);
     if (result) |_| { } else |err|
     {
@@ -151,8 +152,7 @@ fn create_rdpc_session(rdp_connect: *rdpc_session.rdp_connect_t)
 fn term_sig(_: c_int) callconv(.C) void
 {
     const msg: [4]u8 = .{ 'i', 'n', 't', 0 };
-    _ = posix.write(rdpc_session.g_term[1], msg[0..4]) catch
-        return;
+    _ = posix.write(rdpc_session.g_term[1], msg[0..4]) catch return;
 }
 
 //*****************************************************************************
@@ -190,10 +190,9 @@ pub fn main() !void
     defer cleanup_signals();
     try rdpc_session.init();
     defer rdpc_session.deinit();
-    const rdp_connect: *rdpc_session.rdp_connect_t =
-            try g_allocator.create(rdpc_session.rdp_connect_t);
+    const rdp_connect = try g_allocator.create(rdpc_session.rdp_connect_t);
     defer g_allocator.destroy(rdp_connect);
-    rdp_connect.* = .{};
+    rdp_connect.* = std.mem.zeroInit(rdpc_session.rdp_connect_t, .{});
     const session = try create_rdpc_session(rdp_connect);
     defer session.delete();
     try session.connect();
