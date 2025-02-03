@@ -266,13 +266,13 @@ pub const rdp_session_t = struct
             try self.logln_devel(log.LogLevel.debug, @src(), "loop", .{});
             timeout = -1;
             poll_count = 0;
-            // setup terminate socket
+            // setup terminate fd
             polls[poll_count].fd = g_term[0];
             polls[poll_count].events = posix.POLL.IN;
             polls[poll_count].revents = 0;
             const term_index = poll_count;
             poll_count += 1;
-            // setup server socket
+            // setup server fd
             polls[poll_count].fd = self.sck;
             polls[poll_count].events = posix.POLL.IN;
             if (!self.connected)
@@ -286,7 +286,7 @@ pub const rdp_session_t = struct
             polls[poll_count].revents = 0;
             const ssck_index = poll_count;
             poll_count += 1;
-            // setup x11 sockets
+            // setup x11 fds
             const active_fds = try self.rdp_x11.get_fds(&fds, &timeout);
             for (active_fds) |fd|
             {
