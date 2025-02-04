@@ -7,6 +7,8 @@ const posix = std.posix;
 const c = @cImport(
 {
     @cInclude("X11/Xlib.h");
+    @cInclude("X11/Xutil.h");
+    @cInclude("X11/Xatom.h");
     @cInclude("librdpc.h");
 });
 
@@ -186,6 +188,7 @@ pub fn main() !void
 {
     try log.init(&g_allocator, log.LogLevel.debug);
     defer log.deinit();
+    try log.logln(log.LogLevel.info, @src(), "starting up, pid {}", .{std.os.linux.getpid()});
     try setup_signals();
     defer cleanup_signals();
     try rdpc_session.init();

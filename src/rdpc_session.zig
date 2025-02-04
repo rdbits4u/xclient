@@ -6,6 +6,8 @@ const posix = std.posix;
 const c = @cImport(
 {
     @cInclude("X11/Xlib.h");
+    @cInclude("X11/Xutil.h");
+    @cInclude("X11/Xatom.h");
     @cInclude("librdpc.h");
 });
 
