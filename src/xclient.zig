@@ -17,7 +17,17 @@ var g_allocator: std.mem.Allocator = std.heap.c_allocator;
 //*****************************************************************************
 fn show_command_line_args() !void
 {
-    std.debug.print("show_command_line_args\n", .{});
+    const stdout = std.io.getStdOut();
+    const writer = stdout.writer();
+    try writer.print("xclient - A sample application for librdpc\n", .{});
+    try writer.print("Usage: xclient [options] server[:port]\n", .{});
+    try writer.print("  -h: print this help\n", .{});
+    try writer.print("  -u: username\n", .{});
+    try writer.print("  -d: domain\n", .{});
+    try writer.print("  -s: set startup-shell\n", .{});
+    try writer.print("  -c: initial working directory\n", .{});
+    try writer.print("  -p: password\n", .{});
+    try writer.print("  -n: hostname\n", .{});
 }
 
 //*****************************************************************************
@@ -25,7 +35,6 @@ fn process_args(settings: *c.rdpc_settings_t,
         rdp_connect: *rdpc_session.rdp_connect_t) !void
 {
     // default some stuff
-    strings.copyZ(&rdp_connect.server_name, "205.5.60.2");
     strings.copyZ(&rdp_connect.server_port, "3389");
     settings.width = 800;
     settings.height = 600;
@@ -47,14 +56,18 @@ fn process_args(settings: *c.rdpc_settings_t,
     strings.copyZ(&settings.clientname, hostname);
     // process command line args
     var slice_arg: []u8 = undefined;
-    var index: usize = 0;
+    var index: usize = 1;
     const count = std.os.argv.len;
     while (index < count) : (index += 1)
     {
         slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
         try log.logln(log.LogLevel.info, @src(), "{} {} {s}",
                 .{index, count, slice_arg});
-        if (std.mem.eql(u8, slice_arg, "-u"))
+        if (std.mem.eql(u8, slice_arg, "-h"))
+        {
+            return error.ShowCommandLine;
+        }
+        else if (std.mem.eql(u8, slice_arg, "-u"))
         {
             if (index + 1 >= count)
             {
@@ -117,6 +130,19 @@ fn process_args(settings: *c.rdpc_settings_t,
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
             strings.copyZ(&settings.clientname, slice_arg);
         }
+        else
+        {
+            strings.copyZ(&rdp_connect.server_name, slice_arg);
+            const sep = std.mem.lastIndexOfLinear(u8, slice_arg, ":");
+            if (sep) |asep|
+            {
+                if (slice_arg.len - asep > 4)
+                {
+                    strings.copyZ(&rdp_connect.server_name, slice_arg[0..asep]);
+                    strings.copyZ(&rdp_connect.server_port, slice_arg[asep + 1..]);
+                }
+            }
+        }
     }
     // print summary
     try log.logln(log.LogLevel.info, @src(), "domain [{s}]",
@@ -129,6 +155,10 @@ fn process_args(settings: *c.rdpc_settings_t,
             .{std.mem.sliceTo(&settings.workingdir, 0)});
     try log.logln(log.LogLevel.info, @src(), "hostname [{s}]",
             .{std.mem.sliceTo(&settings.clientname, 0)});
+    try log.logln(log.LogLevel.info, @src(), "server name [{s}]",
+            .{std.mem.sliceTo(&rdp_connect.server_name, 0)});
+    try log.logln(log.LogLevel.info, @src(), "server port [{s}]",
+            .{std.mem.sliceTo(&rdp_connect.server_port, 0)});
 }
 
 //*****************************************************************************
@@ -188,7 +218,9 @@ pub fn main() !void
 {
     try log.init(&g_allocator, log.LogLevel.debug);
     defer log.deinit();
-    try log.logln(log.LogLevel.info, @src(), "starting up, pid {}", .{std.os.linux.getpid()});
+    try log.logln(log.LogLevel.info, @src(),
+            "starting up, pid {}",
+            .{std.os.linux.getpid()});
     try setup_signals();
     defer cleanup_signals();
     try rdpc_session.init();
@@ -196,7 +228,8 @@ pub fn main() !void
     const rdp_connect = try g_allocator.create(rdpc_session.rdp_connect_t);
     defer g_allocator.destroy(rdp_connect);
     rdp_connect.* = std.mem.zeroInit(rdpc_session.rdp_connect_t, .{});
-    const session = try create_rdpc_session(rdp_connect);
+    const session = create_rdpc_session(rdp_connect) catch |err|
+            if (err == error.ShowCommandLine) return else return err;
     defer session.delete();
     try session.connect();
     try session.loop();
