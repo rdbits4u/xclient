@@ -248,23 +248,29 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
+    // check that pixmap is created and the right size
     fn check_pixmap(self: *rdp_x11_t, width: c_uint, height: c_uint) !void
     {
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
         if ((self.pixmap == c.None) or
                 (self.width != width) or (self.height != height))
         {
-            try self.session.logln(log.LogLevel.debug, @src(),
-                    "resizing from {} {} to {} {}",
-                    .{self.width, self.height, width, height});
             // create new pixmap
             const new_pix = c.XCreatePixmap(self.display, self.window,
                     width, height, self.depth);
             // clear new pixmap
             _ = c.XFillRectangle(self.display, new_pix, self.gc,
                     0, 0, width, height);
-            if (self.pixmap != c.None)
+            if (self.pixmap == c.None)
             {
+                try self.session.logln(log.LogLevel.debug, @src(),
+                        "create pixmap {} {}", .{width, height});
+            }
+            else
+            {
+                try self.session.logln(log.LogLevel.debug, @src(),
+                        "resize pixmap from {} {} to {} {}",
+                        .{self.width, self.height, width, height});
                 // copy old to new
                 _ = c.XCopyArea(self.display, self.pixmap, new_pix, self.gc,
                         0, 0, width, height, 0, 0);
