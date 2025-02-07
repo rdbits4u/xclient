@@ -38,12 +38,15 @@ pub const rdp_session_t = struct
     send_head: ?*send_t = null,
     send_tail: ?*send_t = null,
     rdp_connect: *rdp_connect_t = undefined,
-    rdp_x11: *rdpc_x11.rdp_x11_t = undefined,
+    rdp_x11: ?*rdpc_x11.rdp_x11_t = null,
 
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
     {
-        self.rdp_x11.delete();
+        if (self.rdp_x11) |ardp_x11|
+        {
+            ardp_x11.delete();
+        }
         _ = c.rdpc_delete(self.rdpc);
         if (self.sck != -1)
         {
@@ -115,21 +118,31 @@ pub const rdp_session_t = struct
     {
         const server = std.mem.sliceTo(&self.rdp_connect.server_name, 0);
         const port = std.mem.sliceTo(&self.rdp_connect.server_port, 0);
-//        try self.logln(log.LogLevel.info, @src(), "connecting to {s} {s}",
-//                .{server, port});
         var address: net.Address = undefined;
         const tpe: u32 = posix.SOCK.STREAM;
-        if (port[0] == '/')
+        if ((port.len > 0) and (port[0] == '/'))
         {
+            try self.logln(log.LogLevel.info, @src(), "connecting to uds {s}",
+                    .{port});
             address = try net.Address.initUnix(port);
-            self.sck = try posix.socket(address.any.family, tpe, 0);
         }
         else
         {
+            try self.logln(log.LogLevel.info, @src(),
+                    "connecting to tcp {s} {s}", .{server, port});
             const port_u16: u16 = try std.fmt.parseInt(u16, port, 10);
-            address = try net.Address.parseIp(server, port_u16);
-            self.sck = try posix.socket(address.any.family, tpe, 0);
+            const address_list = try std.net.getAddressList(self.allocator.*,
+                    server, port_u16);
+            defer address_list.deinit();
+            if (address_list.addrs.len < 1)
+            {
+                return error.Unexpected;
+            }
+            address = address_list.addrs[0];
         }
+        try self.logln(log.LogLevel.info, @src(), "connecting to {}",
+                .{address});
+        self.sck = try posix.socket(address.any.family, tpe, 0);
         // set non blocking
         var val1 = try posix.fcntl(self.sck, posix.F.GETFL, 0);
         if ((val1 & posix.SOCK.NONBLOCK) == 0)
@@ -138,8 +151,8 @@ pub const rdp_session_t = struct
             _ = try posix.fcntl(self.sck, posix.F.SETFL, val1);
         }
         // connect
-        const result = posix.connect(self.sck, &address.any,
-                @sizeOf(net.Address));
+        const address_len = address.getOsSockLen();
+        const result = posix.connect(self.sck, &address.any, address_len);
         if (result) |_| { } else |err|
         {
             // WouldBlock is ok
@@ -224,6 +237,9 @@ pub const rdp_session_t = struct
                         .{rv});
                 return error.StartFailed;
             }
+            const width = self.rdpc.cgcc.core.desktopWidth;
+            const height = self.rdpc.cgcc.core.desktopHeight;
+            self.rdp_x11 = try rdpc_x11.create(self, self.allocator, width, height);
         }
         if (self.send_head) |asend_head|
         {
@@ -289,16 +305,19 @@ pub const rdp_session_t = struct
             const ssck_index = poll_count;
             poll_count += 1;
             // setup x11 fds
-            const active_fds = try self.rdp_x11.get_fds(&fds, &timeout);
-            for (active_fds) |fd|
+            if (self.rdp_x11) |ardp_x11|
             {
-                polls[poll_count].fd = fd;
-                polls[poll_count].events = posix.POLL.IN;
-                polls[poll_count].revents = 0;
-                poll_count += 1;
-                if (poll_count >= max_polls)
+                const active_fds = try ardp_x11.get_fds(&fds, &timeout);
+                for (active_fds) |fd|
                 {
-                    break;
+                    polls[poll_count].fd = fd;
+                    polls[poll_count].events = posix.POLL.IN;
+                    polls[poll_count].revents = 0;
+                    poll_count += 1;
+                    if (poll_count >= max_polls)
+                    {
+                        break;
+                    }
                 }
             }
             const active_polls = polls[0..poll_count];
@@ -322,7 +341,10 @@ pub const rdp_session_t = struct
                 {
                     try self.process_write_server_data();
                 }
-                try self.rdp_x11.check_fds();
+                if (self.rdp_x11) |ardp_x11|
+                {
+                    try ardp_x11.check_fds();
+                }
             }
         }
     }
@@ -359,8 +381,6 @@ pub fn create(allocator: *const std.mem.Allocator,
         ardpc.log_msg = cb_log_msg;
         ardpc.send_to_server = cb_send_to_server;
         self.rdpc = ardpc;
-        self.rdp_x11 = try rdpc_x11.create(self, allocator, settings);
-        errdefer self.rdp_x11.delete();
     }
     else
     {

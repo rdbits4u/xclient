@@ -290,7 +290,7 @@ pub const rdp_x11_t = struct
 //*****************************************************************************
 pub fn create(session: *rdpc_session.rdp_session_t,
         allocator: *const std.mem.Allocator,
-        settings: *c.rdpc_settings_t) !*rdp_x11_t
+        width: u16, height: u16) !*rdp_x11_t
 {
     const self = try allocator.create(rdp_x11_t);
     errdefer allocator.destroy(self);
@@ -298,8 +298,8 @@ pub fn create(session: *rdpc_session.rdp_session_t,
     self.session = session;
     self.allocator = allocator;
     try self.session.logln(log.LogLevel.debug, @src(), "rdp_x11_t", .{});
-    self.width = @bitCast(settings.width);
-    self.height = @bitCast(settings.height);
+    self.width = width;
+    self.height = height;
     const dis = c.XOpenDisplay(null);
     self.display = if (dis) |adis| adis else return error.Unexpected;
     self.fd = c.XConnectionNumber(self.display);
@@ -313,9 +313,10 @@ pub fn create(session: *rdpc_session.rdp_session_t,
     // create window
     try self.create_window();
     // window event mask
-    const event_mask = c.StructureNotifyMask | c.VisibilityChangeMask |
-            c.ButtonPressMask | c.ButtonReleaseMask | c.KeyPressMask |
-            c.ExposureMask | c.PointerMotionMask | c.ExposureMask;
+    const event_mask: c_long = c.StructureNotifyMask |
+            c.VisibilityChangeMask | c.ButtonPressMask |
+            c.ButtonReleaseMask | c.KeyPressMask | c.ExposureMask |
+            c.PointerMotionMask | c.ExposureMask;
     _ = c.XSelectInput(self.display, self.window, event_mask);
     _ = c.XMapWindow(self.display, self.window);
     // create gc

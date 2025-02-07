@@ -17,9 +17,10 @@ var g_allocator: std.mem.Allocator = std.heap.c_allocator;
 //*****************************************************************************
 fn show_command_line_args() !void
 {
+    const app_name = std.mem.sliceTo(std.os.argv[0], 0);
     const stdout = std.io.getStdOut();
     const writer = stdout.writer();
-    try writer.print("xclient - A sample application for librdpc\n", .{});
+    try writer.print("{s} - A sample application for librdpc\n", .{app_name});
     try writer.print("Usage: xclient [options] server[:port]\n", .{});
     try writer.print("  -h: print this help\n", .{});
     try writer.print("  -u: username\n", .{});
@@ -28,6 +29,67 @@ fn show_command_line_args() !void
     try writer.print("  -c: initial working directory\n", .{});
     try writer.print("  -p: password\n", .{});
     try writer.print("  -n: hostname\n", .{});
+    //try writer.print("\n", .{});
+    try writer.print("server:port examples\n", .{});
+    try writer.print("  {s} 192.168.1.1\n", .{app_name});
+    try writer.print("  {s} 192.168.1.1:3390\n", .{app_name});
+    try writer.print("  {s} [aa:bb:cc:dd]\n", .{app_name});
+    try writer.print("  {s} [aa:bb:cc:dd]:3390\n", .{app_name});
+    try writer.print("  {s} /tmp/xrdp.socket\n", .{app_name});
+}
+
+//*****************************************************************************
+fn process_server_port(rdp_connect: *rdpc_session.rdp_connect_t,
+        slice_arg: []u8) void
+{
+    if (slice_arg.len < 1)
+    {
+        return;
+    }
+    // look for /tmp/xrdp.socket
+    const dst: []u8 = if (slice_arg[0] == '/')
+            &rdp_connect.server_port else &rdp_connect.server_name;
+    strings.copyZ(dst, slice_arg);
+    const sep1 = std.mem.lastIndexOfLinear(u8, slice_arg, ":");
+    const sep2 = std.mem.lastIndexOfLinear(u8, slice_arg, "]");
+    const sep3 = std.mem.lastIndexOfLinear(u8, slice_arg, "[");
+    while (true) : (break)
+    {
+        if (sep1) |asep1| // look for [aaaa:bbbb:cccc:dddd]:3389
+        {
+            if (sep2) |asep2|
+            {
+                if (sep3) |asep3|
+                {
+                    if (asep1 > asep2)
+                    {
+                        const s = slice_arg[asep3 + 1..asep2];
+                        const p = slice_arg[asep1 + 1..];
+                        strings.copyZ(&rdp_connect.server_name, s);
+                        strings.copyZ(&rdp_connect.server_port, p);
+                        break;
+                    }
+                }
+            }
+        }
+        if (sep2) |asep2| // look for [aaaa:bbbb:cccc:dddd]
+        {
+            if (sep3) |asep3|
+            {
+                const s = slice_arg[asep3 + 1..asep2];
+                strings.copyZ(&rdp_connect.server_name, s);
+                break;
+            }
+        }
+        if (sep1) |asep1| // look for 127.0.0.1:3389
+        {
+            const s = slice_arg[0..asep1];
+            const p = slice_arg[asep1 + 1..];
+            strings.copyZ(&rdp_connect.server_name, s);
+            strings.copyZ(&rdp_connect.server_port, p);
+            break;
+        }
+    }
 }
 
 //*****************************************************************************
@@ -132,16 +194,7 @@ fn process_args(settings: *c.rdpc_settings_t,
         }
         else
         {
-            strings.copyZ(&rdp_connect.server_name, slice_arg);
-            const sep = std.mem.lastIndexOfLinear(u8, slice_arg, ":");
-            if (sep) |asep|
-            {
-                if (slice_arg.len - asep > 4)
-                {
-                    strings.copyZ(&rdp_connect.server_name, slice_arg[0..asep]);
-                    strings.copyZ(&rdp_connect.server_port, slice_arg[asep + 1..]);
-                }
-            }
+            process_server_port(rdp_connect, slice_arg);
         }
     }
     // print summary
