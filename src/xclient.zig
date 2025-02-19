@@ -29,7 +29,6 @@ fn show_command_line_args() !void
     try writer.print("  -c: initial working directory\n", .{});
     try writer.print("  -p: password\n", .{});
     try writer.print("  -n: hostname\n", .{});
-    //try writer.print("\n", .{});
     try writer.print("server:port examples\n", .{});
     try writer.print("  {s} 192.168.1.1\n", .{app_name});
     try writer.print("  {s} 192.168.1.1:3390\n", .{app_name});
@@ -120,6 +119,12 @@ fn process_args(settings: *c.rdpc_settings_t,
     var slice_arg: []u8 = undefined;
     var index: usize = 1;
     const count = std.os.argv.len;
+    if (count < 2)
+    {
+        try log.logln(log.LogLevel.info, @src(),
+                "not enough parameters", .{});
+        return error.ShowCommandLine;
+    }
     while (index < count) : (index += 1)
     {
         slice_arg = std.mem.sliceTo(std.os.argv[index], 0);

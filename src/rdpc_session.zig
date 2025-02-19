@@ -122,8 +122,8 @@ pub const rdp_session_t = struct
         const tpe: u32 = posix.SOCK.STREAM;
         if ((port.len > 0) and (port[0] == '/'))
         {
-            try self.logln(log.LogLevel.info, @src(), "connecting to uds {s}",
-                    .{port});
+            try self.logln(log.LogLevel.info, @src(),
+                    "connecting to uds {s}", .{port});
             address = try net.Address.initUnix(port);
         }
         else
