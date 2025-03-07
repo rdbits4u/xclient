@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const hexdump = @import("hexdump");
 const strings = @import("strings");
 const log = @import("log.zig");
@@ -20,7 +21,9 @@ fn show_command_line_args() !void
     const app_name = std.mem.sliceTo(std.os.argv[0], 0);
     const stdout = std.io.getStdOut();
     const writer = stdout.writer();
+    const vstr = builtin.zig_version_string;
     try writer.print("{s} - A sample application for librdpc\n", .{app_name});
+    try writer.print("built with zig version {s}\n", .{vstr});
     try writer.print("Usage: xclient [options] server[:port]\n", .{});
     try writer.print("  -h: print this help\n", .{});
     try writer.print("  -u: username\n", .{});
@@ -97,6 +100,7 @@ fn process_args(settings: *c.rdpc_settings_t,
 {
     // default some stuff
     strings.copyZ(&rdp_connect.server_port, "3389");
+    settings.bpp = 24;
     settings.width = 800;
     settings.height = 600;
     settings.dpix = 96;
@@ -225,7 +229,7 @@ fn create_rdpc_session(rdp_connect: *rdpc_session.rdp_connect_t)
 {
     const settings = try g_allocator.create(c.struct_rdpc_settings_t);
     defer g_allocator.destroy(settings);
-    settings.* = std.mem.zeroInit(c.struct_rdpc_settings_t, .{});
+    settings.* = .{};
     const result = process_args(settings, rdp_connect);
     if (result) |_| { } else |err|
     {
@@ -258,10 +262,10 @@ fn setup_signals() !void
     sa.mask = posix.empty_sigset;
     sa.flags = 0;
     sa.handler = .{ .handler = term_sig };
-    try posix.sigaction(posix.SIG.INT, &sa, null);
-    try posix.sigaction(posix.SIG.TERM, &sa, null);
+    posix.sigaction(posix.SIG.INT, &sa, null);
+    posix.sigaction(posix.SIG.TERM, &sa, null);
     sa.handler = .{ .handler = pipe_sig };
-    try posix.sigaction(posix.SIG.PIPE, &sa, null);
+    posix.sigaction(posix.SIG.PIPE, &sa, null);
 }
 
 //*****************************************************************************
@@ -285,7 +289,7 @@ pub fn main() !void
     defer rdpc_session.deinit();
     const rdp_connect = try g_allocator.create(rdpc_session.rdp_connect_t);
     defer g_allocator.destroy(rdp_connect);
-    rdp_connect.* = std.mem.zeroInit(rdpc_session.rdp_connect_t, .{});
+    rdp_connect.* = .{};
     const session = create_rdpc_session(rdp_connect) catch |err|
             if (err == error.ShowCommandLine) return else return err;
     defer session.delete();

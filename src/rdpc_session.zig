@@ -364,7 +364,7 @@ pub fn create(allocator: *const std.mem.Allocator,
 {
     const self = try allocator.create(rdp_session_t);
     errdefer allocator.destroy(self);
-    self.* = std.mem.zeroInit(rdp_session_t, .{});
+    self.* = .{};
     self.allocator = allocator;
     self.rdp_connect = rdp_connect;
     try self.logln(log.LogLevel.debug, @src(), "rdp_session_t", .{});

@@ -210,7 +210,7 @@ pub const rdp_x11_t = struct
     {
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
         // attribs for create window
-        var attribs = std.mem.zeroInit(c.XSetWindowAttributes, .{});
+        var attribs: c.XSetWindowAttributes = .{};
         attribs.background_pixel = self.black;
         attribs.border_pixel = self.white;
         attribs.backing_store = c.NotUseful;
@@ -227,7 +227,7 @@ pub const rdp_x11_t = struct
                 0, 0, self.width, self.height, 0, @bitCast(self.depth),
                 c.InputOutput, self.visual, value_mask, &attribs);
         // setup WM_CLASS for window manager
-        var class_hints = std.mem.zeroInit(c.XClassHint, .{});
+        var class_hints: c.XClassHint = .{};
         var res_name: [16]u8 = undefined;
         var res_class: [16]u8 = undefined;
         strings.copyZ(&res_name, "xclient");
@@ -294,7 +294,7 @@ pub fn create(session: *rdpc_session.rdp_session_t,
 {
     const self = try allocator.create(rdp_x11_t);
     errdefer allocator.destroy(self);
-    self.* = std.mem.zeroInit(rdp_x11_t, .{});
+    self.* = .{};
     self.session = session;
     self.allocator = allocator;
     try self.session.logln(log.LogLevel.debug, @src(), "rdp_x11_t", .{});
