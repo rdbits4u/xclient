@@ -1,5 +1,5 @@
 const std = @import("std");
-const log = @import("log.zig");
+const log = @import("log");
 const rdpc_x11 = @import("rdpc_x11.zig");
 const net = std.net;
 const posix = std.posix;

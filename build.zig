@@ -24,6 +24,9 @@ pub fn build(b: *std.Build) void
     xclient.root_module.addImport("strings", b.createModule(.{
         .root_source_file = b.path("../common/strings.zig"),
     }));
+    xclient.root_module.addImport("log", b.createModule(.{
+        .root_source_file = b.path("../common/log.zig"),
+    }));
     setExtraLibraryPaths(xclient, target);
     b.installArtifact(xclient);
 }
