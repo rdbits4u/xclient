@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = @import("log");
+const hexdump = @import("hexdump");
 const rdpc_x11 = @import("rdpc_x11.zig");
 const net = std.net;
 const posix = std.posix;
@@ -9,7 +10,22 @@ const c = @cImport(
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
     @cInclude("librdpc.h");
+    @cInclude("pixman.h");
+    @cInclude("rfxcodec_decode.h");
 });
+
+const MyError = error
+{
+    RegUnion,
+    RegZero,
+    RfxDecoderCreate,
+    LookupAddress,
+    Connect,
+    RdpcProcessServerData,
+    RdpcStart,
+    RdpcCreate,
+    RdpcInit,
+};
 
 pub var g_term: [2]i32 = .{-1, -1};
 
@@ -40,9 +56,13 @@ pub const rdp_session_t = struct
     rdp_connect: *rdp_connect_t = undefined,
     rdp_x11: ?*rdpc_x11.rdp_x11_t = null,
 
+    rfxdecoder: ?*anyopaque = null,
+    ddata: []u8 = undefined,
+
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
     {
+        self.cleanup_rfxdecoder();
         if (self.rdp_x11) |ardp_x11|
         {
             ardp_x11.delete();
@@ -114,6 +134,213 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn setup_rfxdecoder(self: *rdp_session_t, width: u16, height: u16) !void
+    {
+        const rv = c.rfxcodec_decode_create_ex(width, height,
+                c.RFX_FORMAT_BGRA, c.RFX_FLAGS_SAFE, &self.rfxdecoder);
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "rfxcodec_decode_create_ex rv {}", .{rv});
+        if (rv != 0)
+        {
+            return MyError.RfxDecoderCreate;
+        }
+        errdefer self.cleanup_rfxdecoder();
+        const al: u16 = 63;
+        const awidth: usize = (width + al) & ~al;
+        const aheight: usize = (height + al) & ~al;
+        const size = awidth * aheight * 4;
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "create awidth {} aheight {} size {} al {}",
+                .{awidth, aheight, size, al});
+        self.ddata = try self.allocator.alloc(u8, size);
+        errdefer self.allocator.free(self.ddata);
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "ddata.ptr {*} ddata.len {}",
+                .{self.ddata.ptr, self.ddata.len});
+    }
+
+    //*************************************************************************
+    fn cleanup_rfxdecoder(self: *rdp_session_t) void
+    {
+        if (self.rfxdecoder) |arfxdecoder|
+        {
+            self.allocator.free(self.ddata);
+            _ = c.rfxcodec_decode_destroy(arfxdecoder);
+            self.rfxdecoder = null;
+        }
+    }
+
+    //*************************************************************************
+    fn get_rect_reg(self: *rdp_session_t,
+            rects: ?[*]c.rfx_rect, num_rects: i32) !*c.pixman_region16_t
+    {
+        const reg = try self.allocator.create(c.pixman_region16_t);
+        errdefer self.allocator.destroy(reg);
+        reg.* = .{};
+        if (num_rects < 1)
+        {
+            return MyError.RegZero;
+        }
+        if (rects) |arects|
+        {
+            try self.logln_devel(log.LogLevel.info, @src(),
+                    "index 0 x {} y {} cx {} cy {}",
+                    .{arects[0].x, arects[0].y,
+                    arects[0].cx, arects[0].cy});
+            c.pixman_region_init_rect(reg,
+                    arects[0].x, arects[0].y,
+                    @bitCast(arects[0].cx),
+                    @bitCast(arects[0].cy));
+            errdefer c.pixman_region_fini(reg);
+            const count: usize = @intCast(num_rects);
+            for (1..count) |index|
+            {
+                try self.logln_devel(log.LogLevel.info, @src(),
+                        "index {} x {} y {} cx {} cy {}",
+                        .{index, arects[index].x, arects[index].y,
+                        arects[index].cx, arects[index].cy});
+                if (c.pixman_region_union_rect(reg, reg,
+                        arects[index].x, arects[index].y,
+                        @bitCast(arects[index].cx),
+                        @bitCast(arects[index].cy)) == 0)
+                {
+                    return MyError.RegUnion;
+                }
+            }
+        }
+        return reg;
+    }
+
+    //*************************************************************************
+    fn get_tile_reg(self: *rdp_session_t,
+            tiles: ?[*]c.rfx_tile, num_tiles: i32) !*c.pixman_region16_t
+    {
+        const reg = try self.allocator.create(c.pixman_region16_t);
+        errdefer self.allocator.destroy(reg);
+        reg.* = .{};
+        if (num_tiles < 1)
+        {
+            return MyError.RegZero;
+        }
+        if (tiles) |atiles|
+        {
+            try self.logln_devel(log.LogLevel.info, @src(),
+                    "index 0 x {} y {} cx {} cy {}",
+                    .{atiles[0].x, atiles[0].y,
+                    atiles[0].cx, atiles[0].cy});
+            c.pixman_region_init_rect(reg,
+                    atiles[0].x, atiles[0].y,
+                    @bitCast(atiles[0].cx),
+                    @bitCast(atiles[0].cy));
+            errdefer c.pixman_region_fini(reg);
+            const count: usize = @intCast(num_tiles);
+            for (1..count) |index|
+            {
+                try self.logln_devel(log.LogLevel.info, @src(),
+                        "index {} x {} y {} cx {} cy {}",
+                        .{index, atiles[index].x, atiles[index].y,
+                        atiles[index].cx, atiles[index].cy});
+                if (c.pixman_region_union_rect(reg, reg,
+                        atiles[index].x, atiles[index].y,
+                        @bitCast(atiles[index].cx),
+                        @bitCast(atiles[index].cy)) == 0)
+                {
+                    return MyError.RegUnion;
+                }
+            }
+        }
+        return reg;
+    }
+
+    //*************************************************************************
+    fn cleanup_reg(self: *rdp_session_t, reg: *c.pixman_region16_t) void
+    {
+        c.pixman_region_fini(reg);
+        self.allocator.destroy(reg);
+    }
+
+    //*************************************************************************
+    fn set_surface_bits(self: *rdp_session_t,
+            bitmap_data: *c.bitmap_data_t) !void
+    {
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "bits_per_pixel {}",
+                .{bitmap_data.bits_per_pixel});
+        if (self.rfxdecoder == null)
+        {
+            try self.setup_rfxdecoder(bitmap_data.width, bitmap_data.height);
+        }
+        if (self.rfxdecoder) |arfxdecoder|
+        {
+            var rects: ?[*]c.rfx_rect = null;
+            var num_rects: i32 = 0;
+            var tiles:  ?[*]c.rfx_tile = null;
+            var num_tiles: i32 = 0;
+            try self.logln_devel(log.LogLevel.info, @src(),
+                    "decode width {} height {} self.ddata.ptr {*}",
+                    .{bitmap_data.width, bitmap_data.height, self.ddata.ptr});
+            const rv = c.rfxcodec_decode_ex(arfxdecoder,
+                    @ptrCast(bitmap_data.bitmap_data),
+                    @bitCast(bitmap_data.bitmap_data_len),
+                    self.ddata.ptr, bitmap_data.width, bitmap_data.height,
+                    bitmap_data.width * 4, &rects, &num_rects,
+                    &tiles, &num_tiles, 0);
+            try self.logln_devel(log.LogLevel.info, @src(),
+                    "rfxcodec_decode rv {} num_rects {} num_tiles {}",
+                    .{rv, num_rects, num_tiles});
+            if (rv == 0)
+            {
+                if (self.rdp_x11) |ardp_x11|
+                {
+                    const rect_reg = try get_rect_reg(self, rects, num_rects);
+                    defer self.cleanup_reg(rect_reg);
+                    const tile_reg = try get_tile_reg(self, tiles, num_tiles);
+                    defer self.cleanup_reg(tile_reg);
+                    var reg: c.pixman_region16_t = .{};
+                    c.pixman_region_init(&reg);
+                    defer c.pixman_region_fini(&reg);
+                    var clips: []c.XRectangle = &.{};
+                    defer self.allocator.free(clips);
+                    if (c.pixman_region_intersect(&reg, rect_reg,
+                            tile_reg) != 0)
+                    {
+                        var box: c.pixman_box16_t = .{.x1 = 0, .y1 = 0,
+                                .x2 = @bitCast(bitmap_data.width),
+                                .y2 = @bitCast(bitmap_data.height)};
+                        const reg_overlap =
+                                c.pixman_region_contains_rectangle(&reg, &box);
+                        var num_clip_rects: c_int = 0;
+                        const clip_rects = c.pixman_region_rectangles(&reg,
+                                &num_clip_rects);
+                        if ((clip_rects != null) and (num_clip_rects > 0) and
+                                (reg_overlap == c.PIXMAN_REGION_PART))
+                        {
+                            const unum_clip_rects: usize =
+                                    @intCast(num_clip_rects);
+                            clips = try self.allocator.alloc(c.XRectangle,
+                                    unum_clip_rects);
+                            for (0..unum_clip_rects) |index|
+                            {
+                                const x = clip_rects[index].x1;
+                                const y = clip_rects[index].y1;
+                                const w = clip_rects[index].x2 - x;
+                                const h = clip_rects[index].y2 - y;
+                                clips[index].x = x;
+                                clips[index].y = y;
+                                clips[index].width = @bitCast(w);
+                                clips[index].height = @bitCast(h);
+                            }
+                        }
+                    }
+                    try ardp_x11.draw_image(bitmap_data.width,
+                            bitmap_data.height, bitmap_data.width * 4,
+                            self.ddata, clips);
+                }
+            }
+        }
+    }
+
+    //*************************************************************************
     pub fn connect(self: *rdp_session_t) !void
     {
         const server = std.mem.sliceTo(&self.rdp_connect.server_name, 0);
@@ -136,7 +363,7 @@ pub const rdp_session_t = struct
             defer address_list.deinit();
             if (address_list.addrs.len < 1)
             {
-                return error.Unexpected;
+                return MyError.LookupAddress;
             }
             address = address_list.addrs[0];
         }
@@ -167,16 +394,18 @@ pub const rdp_session_t = struct
     // data from the rdp server
     fn read_process_server_data(self: *rdp_session_t) !void
     {
-        try self.logln(log.LogLevel.debug, @src(), "server sck is set", .{});
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "server sck is set", .{});
         const recv_slice = self.in_data_slice[self.recv_start..];
         const recv_rv = try posix.recv(self.sck, recv_slice, 0);
-        try self.logln(log.LogLevel.debug, @src(), "recv_rv {} recv_start {}",
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "recv_rv {} recv_start {}",
                 .{recv_rv, self.recv_start});
         if (recv_rv > 0)
         {
             if (!self.connected)
             {
-                return error.Unexpected;
+                return MyError.Connect;
             }
             var end = self.recv_start + recv_rv;
             while (end > 0)
@@ -211,13 +440,13 @@ pub const rdp_session_t = struct
                     try self.logln(log.LogLevel.debug, @src(),
                             "rdpc_process_server_data error {}",
                             .{rv});
-                    return error.Unexpected;
+                    return MyError.RdpcProcessServerData;
                 }
             }
         }
         else
         {
-            return error.Disconnected;
+            return MyError.Connect;
         }
     }
 
@@ -235,11 +464,14 @@ pub const rdp_session_t = struct
                 try self.logln(log.LogLevel.err,
                         @src(), "rdpc_start failed error {}",
                         .{rv});
-                return error.StartFailed;
+                return MyError.RdpcStart;
             }
             const width = self.rdpc.cgcc.core.desktopWidth;
             const height = self.rdpc.cgcc.core.desktopHeight;
-            self.rdp_x11 = try rdpc_x11.create(self, self.allocator, width, height);
+            try self.logln(log.LogLevel.info, @src(), "width {} height {}",
+                    .{width, height});
+            self.rdp_x11 = try rdpc_x11.create(self, self.allocator,
+                    width, height);
         }
         if (self.send_head) |asend_head|
         {
@@ -263,7 +495,7 @@ pub const rdp_session_t = struct
             }
             else
             {
-                return error.Disconnected;
+                return MyError.Connect;
             }
         }
     }
@@ -373,18 +605,19 @@ pub fn create(allocator: *const std.mem.Allocator,
     errdefer _ = c.rdpc_delete(rdpc);
     if (rv != c.LIBRDPC_ERROR_NONE)
     {
-        return error.OutOfMemory;
+        return MyError.RdpcCreate;
     }
     if (rdpc) |ardpc|
     {
         ardpc.user[0] = self;
         ardpc.log_msg = cb_log_msg;
         ardpc.send_to_server = cb_send_to_server;
+        ardpc.set_surface_bits = cb_set_surface_bits;
         self.rdpc = ardpc;
     }
     else
     {
-        return error.OutOfMemory;
+        return MyError.RdpcCreate;
     }
     return self;
 }
@@ -394,7 +627,7 @@ pub fn init() !void
 {
     if (c.rdpc_init() != c.LIBRDPC_ERROR_NONE)
     {
-        return  error.OutOfMemory;
+        return  MyError.RdpcInit;
     }
 }
 
@@ -473,7 +706,32 @@ fn cb_send_to_server(rdpc: ?*c.rdpc_t,
                 slice.len = @intCast(bytes);
                 rv = c.LIBRDPC_ERROR_NONE;
                 ardp_session.send_slice_to_server(slice) catch
-                    return c.LIBRDPC_ERROR_PARSE;
+                        return c.LIBRDPC_ERROR_PARSE;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*set_surface_bits)(struct rdpc_t* rdpc,
+// struct bitmap_data_t* bitmap_data);
+fn cb_set_surface_bits(rdpc: ?*c.rdpc_t,
+        bitmap_data: ?*c.bitmap_data_t) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        if (bitmap_data) |abitmap_data|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpc.user[0]));
+            if (session) |ardp_session|
+            {
+                ardp_session.set_surface_bits(abitmap_data) catch
+                        return c.LIBRDPC_ERROR_PARSE;
+                rv = 0;
             }
         }
     }

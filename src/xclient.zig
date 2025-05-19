@@ -11,6 +11,8 @@ const c = @cImport(
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
     @cInclude("librdpc.h");
+    @cInclude("pixman.h");
+    @cInclude("rfxcodec_decode.h");
 });
 
 var g_allocator: std.mem.Allocator = std.heap.c_allocator;
@@ -100,9 +102,9 @@ fn process_args(settings: *c.rdpc_settings_t,
 {
     // default some stuff
     strings.copyZ(&rdp_connect.server_port, "3389");
-    settings.bpp = 24;
-    settings.width = 800;
-    settings.height = 600;
+    settings.bpp = 32;
+    settings.width = 1024;
+    settings.height = 768;
     settings.dpix = 96;
     settings.dpiy = 96;
     settings.keyboard_layout = 0x0409;
@@ -110,11 +112,14 @@ fn process_args(settings: *c.rdpc_settings_t,
     settings.rdpsnd = 1;
     settings.rail = 1;
     settings.rdpdr = 1;
+    settings.rfx = 1;
+    settings.jpg = 0;
     // get some info from os
     if (std.posix.getenv("USER")) |auser_env|
     {
         strings.copyZ(&settings.username, auser_env);
     }
+    strings.copyZ(&settings.password, "qpalzm1");
     var hostname_buf: [std.posix.HOST_NAME_MAX]u8 =
             std.mem.zeroes([std.posix.HOST_NAME_MAX]u8);
     const hostname = try std.posix.gethostname(&hostname_buf);
@@ -258,6 +263,8 @@ fn pipe_sig(_: c_int) callconv(.C) void
 fn setup_signals() !void
 {
     rdpc_session.g_term = try posix.pipe();
+    errdefer posix.close(rdpc_session.g_term[0]);
+    errdefer posix.close(rdpc_session.g_term[1]);
     var sa: posix.Sigaction = undefined;
     sa.mask = posix.empty_sigset;
     sa.flags = 0;
