@@ -6,9 +6,12 @@ const net = std.net;
 const posix = std.posix;
 const c = @cImport(
 {
+    @cInclude("sys/ipc.h");
+    @cInclude("sys/shm.h");
     @cInclude("X11/Xlib.h");
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
+    @cInclude("X11/extensions/XShm.h");
     @cInclude("librdpc.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
@@ -35,6 +38,7 @@ pub const rdp_x11_t = struct
     net_wm_pid: c.Atom = 0,
     wm_protocols: c.Atom = 0,
     wm_delete_window: c.Atom = 0,
+    got_xshm: bool = false,
 
     //*************************************************************************
     pub fn delete(self: *rdp_x11_t) void
@@ -321,23 +325,27 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
-    pub fn draw_image(self: *rdp_x11_t, width: c_uint, height: c_uint,
-            stride_bytes: c_int, data: []u8, clips: []c.XRectangle) !void
+    fn draw_image_noshm(self: *rdp_x11_t,
+            src_width: c_uint, src_height: c_uint,
+            dst_width: c_uint, dst_height: c_uint,
+            data: []u8, clips: []c.XRectangle) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "clips.len {}", .{clips.len});
+        const stride_bytes: c_int = @bitCast(src_width * 4);
         if (clips.len < 1)
         {
-            const image = c.XCreateImage(self.display, self.visual, self.depth,
-                    c.ZPixmap, 0, data.ptr, width, height, 32, stride_bytes);
+            const image = c.XCreateImage(self.display, self.visual,
+                    self.depth, c.ZPixmap, 0, data.ptr,
+                    src_width, src_height, 32, stride_bytes);
             if (image) |aimage|
             {
                 // draw entire image
                 defer _ = c.XFree(aimage);
                 _ = c.XPutImage(self.display, self.pixmap, self.gc, aimage,
-                        0, 0, 0, 0, width, height);
-                _ = c.XCopyArea(self.display, self.pixmap, self.window, self.gc,
-                        0, 0, width, height, 0, 0);
+                        0, 0, 0, 0, dst_width, dst_height);
+                _ = c.XCopyArea(self.display, self.pixmap, self.window,
+                        self.gc, 0, 0, dst_width, dst_height, 0, 0);
             }
         }
         else
@@ -347,7 +355,6 @@ pub const rdp_x11_t = struct
                 try self.session.logln_devel(log.LogLevel.debug, @src(),
                         "x {} y {} width {} height {}",
                         .{aclip.x, aclip.y, aclip.width, aclip.height});
-                // copy the image part
                 const pixmap_data: []u8 = try self.allocator.alloc(u8,
                         @as(usize, 4) * aclip.width * aclip.height);
                 defer self.allocator.free(pixmap_data);
@@ -380,69 +387,52 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
-    pub fn draw_image1(self: *rdp_x11_t, width: c_uint, height: c_uint,
-            stride_bytes: c_int, data: []u8, clips: []c.XRectangle) !void
+    fn draw_image_shm(self: *rdp_x11_t,
+            src_width: c_uint, src_height: c_uint,
+            dst_width: c_uint, dst_height: c_uint,
+            data: []u8, clips: []c.XRectangle) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "clips.len {}", .{clips.len});
-        if (clips.len < 1)
-        {
-            const image = c.XCreateImage(self.display, self.visual, self.depth,
-                    c.ZPixmap, 0, data.ptr, width, height, 32, stride_bytes);
-            _ = c.XPutImage(self.display, self.pixmap, self.gc, image,
-                    0, 0, 0, 0, width, height);
-            _ = c.XFree(image);
-            _ = c.XCopyArea(self.display, self.pixmap, self.window, self.gc,
-                    0, 0, width, height, 0, 0);
-        }
-        else
-        {
-            for (clips) |aclip|
-            {
-                try self.session.logln_devel(log.LogLevel.debug, @src(),
-                        "x {} y {} width {} height {}",
-                        .{aclip.x, aclip.y, aclip.width, aclip.height});
-                const x: c_int = aclip.x;
-                const y: c_int = aclip.y;
-                const offset: c_int = y * stride_bytes + x * 4;
-                const uoffset: usize = @intCast(offset);
-                const src_ptr = data.ptr + uoffset;
-                const image = c.XCreateImage(self.display, self.visual,
-                        self.depth, c.ZPixmap, 0, src_ptr,
-                        aclip.width, aclip.height, 32, stride_bytes);
-                _ = c.XPutImage(self.display, self.pixmap, self.gc, image,
-                        0, 0, aclip.x, aclip.y, aclip.width, aclip.height);
-                _ = c.XFree(image);
-                _ = c.XCopyArea(self.display, self.pixmap, self.window,
-                        self.gc, aclip.x, aclip.y, aclip.width, aclip.height,
-                        aclip.x, aclip.y);
-            }
-        }
-    }
-
-    //*************************************************************************
-    pub fn draw_image2(self: *rdp_x11_t, width: c_uint, height: c_uint,
-            stride_bytes: c_int, data: []u8, clips: []c.XRectangle) !void
-    {
-        try self.session.logln_devel(log.LogLevel.debug, @src(),
-                "clips.len {}", .{clips.len});
-        const image = c.XCreateImage(self.display, self.visual, self.depth,
-                c.ZPixmap, 0, data.ptr, width, height, 32, stride_bytes);
+        var shminfo: c.XShmSegmentInfo = .{};
+        shminfo.shmid = self.session.shm_info.shmid;
+        shminfo.shmaddr = data.ptr;
+        const image = c.XShmCreateImage(self.display, self.visual,
+                self.depth, c.ZPixmap, data.ptr, &shminfo,
+                src_width, src_height);
+        _ = c.XShmAttach(self.display, &shminfo);
         if (clips.len > 0)
         {
             _ = c.XSetClipRectangles(self.display, self.gc, 0, 0,
                     clips.ptr, @intCast(clips.len), c.Unsorted);
         }
-        _ = c.XPutImage(self.display, self.pixmap, self.gc, image,
-                0, 0, 0, 0, width, height);
+        _ = c.XShmPutImage(self.display, self.pixmap, self.gc, image,
+                0, 0, 0, 0, dst_width, dst_height, 0);
+        _ = c.XSync(self.display, 0);
+        _ = c.XShmDetach(self.display, &shminfo);
         _ = c.XFree(image);
         // GC still has clip for XCopyArea
         _ = c.XCopyArea(self.display, self.pixmap, self.window, self.gc,
-                0, 0, width, height, 0, 0);
+                0, 0, dst_width, dst_height, 0, 0);
         if (clips.len > 0)
         {
             _ = c.XSetClipMask(self.display, self.gc, c.None);
         }
+    }
+
+    //*************************************************************************
+    pub fn draw_image(self: *rdp_x11_t,
+            src_width: c_uint, src_height: c_uint,
+            dst_width: c_uint, dst_height: c_uint,
+            data: []u8, clips: []c.XRectangle) !void
+    {
+        if (self.got_xshm)
+        {
+            return self.draw_image_shm(src_width, src_height,
+                    dst_width, dst_height, data, clips);
+        }
+        return self.draw_image_noshm(src_width, src_height,
+                dst_width, dst_height, data, clips);
     }
 
 };
@@ -486,6 +476,8 @@ pub fn create(session: *rdpc_session.rdp_session_t,
             c.GCGraphicsExposures, &gcv);
     // pixmap
     try self.check_pixmap(self.width, self.height);
+    // check for Xshm
+    self.got_xshm = c.XShmQueryExtension(self.display) != 0;
     // flush to send all requests to xserver
     _ = c.XFlush(self.display);
     return self;

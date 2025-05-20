@@ -6,9 +6,12 @@ const net = std.net;
 const posix = std.posix;
 const c = @cImport(
 {
+    @cInclude("sys/ipc.h");
+    @cInclude("sys/shm.h");
     @cInclude("X11/Xlib.h");
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
+    @cInclude("X11/extensions/XShm.h");
     @cInclude("librdpc.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
@@ -28,6 +31,13 @@ const MyError = error
 };
 
 pub var g_term: [2]i32 = .{-1, -1};
+
+const shm_info_t = struct
+{
+	shmid: c_int = -1,
+	bytes: u32 = 0,
+	ptr: ?*anyopaque = null,
+};
 
 // for storing left over data for server
 const send_t = struct
@@ -58,10 +68,12 @@ pub const rdp_session_t = struct
 
     rfxdecoder: ?*anyopaque = null,
     ddata: []u8 = undefined,
+    shm_info: shm_info_t = .{},
 
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
     {
+        shm_info_deinit(&self.shm_info);
         self.cleanup_rfxdecoder();
         if (self.rdp_x11) |ardp_x11|
         {
@@ -136,27 +148,36 @@ pub const rdp_session_t = struct
     //*************************************************************************
     fn setup_rfxdecoder(self: *rdp_session_t, width: u16, height: u16) !void
     {
-        const rv = c.rfxcodec_decode_create_ex(width, height,
+        const al: u16 = 63;
+        const awidth: u16 = (width + al) & ~al;
+        const aheight: u16 = (height + al) & ~al;
+        const rv = c.rfxcodec_decode_create_ex(awidth, aheight,
                 c.RFX_FORMAT_BGRA, c.RFX_FLAGS_SAFE, &self.rfxdecoder);
+        errdefer self.cleanup_rfxdecoder();
         try self.logln_devel(log.LogLevel.info, @src(),
                 "rfxcodec_decode_create_ex rv {}", .{rv});
         if (rv != 0)
         {
             return MyError.RfxDecoderCreate;
         }
-        errdefer self.cleanup_rfxdecoder();
-        const al: u16 = 63;
-        const awidth: usize = (width + al) & ~al;
-        const aheight: usize = (height + al) & ~al;
-        const size = awidth * aheight * 4;
+        const size = @as(u32, 4) * awidth * aheight;
         try self.logln_devel(log.LogLevel.info, @src(),
-                "create awidth {} aheight {} size {} al {}",
-                .{awidth, aheight, size, al});
-        self.ddata = try self.allocator.alloc(u8, size);
-        errdefer self.allocator.free(self.ddata);
-        try self.logln_devel(log.LogLevel.info, @src(),
-                "ddata.ptr {*} ddata.len {}",
-                .{self.ddata.ptr, self.ddata.len});
+                "create awidth {} aheight {} size {} {} al {}",
+                .{awidth, aheight, size, @TypeOf(size), al});
+        if (size > self.shm_info.bytes)
+        {
+            shm_info_deinit(&self.shm_info);
+            try shm_info_init(size, &self.shm_info);
+        }
+        if (self.shm_info.ptr) |aptr|
+        {
+            self.ddata.ptr = @ptrCast(aptr);
+            self.ddata.len = self.shm_info.bytes;
+        }
+        else
+        {
+            return MyError.RfxDecoderCreate;
+        }
     }
 
     //*************************************************************************
@@ -199,10 +220,11 @@ pub const rdp_session_t = struct
                         "index {} x {} y {} cx {} cy {}",
                         .{index, arects[index].x, arects[index].y,
                         arects[index].cx, arects[index].cy});
-                if (c.pixman_region_union_rect(reg, reg,
+                const pixman_bool = c.pixman_region_union_rect(reg, reg,
                         arects[index].x, arects[index].y,
                         @bitCast(arects[index].cx),
-                        @bitCast(arects[index].cy)) == 0)
+                        @bitCast(arects[index].cy));
+                if (pixman_bool == 0)
                 {
                     return MyError.RegUnion;
                 }
@@ -240,10 +262,11 @@ pub const rdp_session_t = struct
                         "index {} x {} y {} cx {} cy {}",
                         .{index, atiles[index].x, atiles[index].y,
                         atiles[index].cx, atiles[index].cy});
-                if (c.pixman_region_union_rect(reg, reg,
+                const pixman_bool = c.pixman_region_union_rect(reg, reg,
                         atiles[index].x, atiles[index].y,
                         @bitCast(atiles[index].cx),
-                        @bitCast(atiles[index].cy)) == 0)
+                        @bitCast(atiles[index].cy));
+                if (pixman_bool == 0)
                 {
                     return MyError.RegUnion;
                 }
@@ -257,6 +280,37 @@ pub const rdp_session_t = struct
     {
         c.pixman_region_fini(reg);
         self.allocator.destroy(reg);
+    }
+
+    //*************************************************************************
+    fn get_clips_from_reg(self: *rdp_session_t, width: u16, height: u16,
+            reg: *c.pixman_region16_t) ![]c.XRectangle
+    {
+        var clips: []c.XRectangle = &.{};
+        var box: c.pixman_box16_t = .{.x1 = 0, .y1 = 0,
+                .x2 = @bitCast(width), .y2 = @bitCast(height)};
+        const reg_overlap = c.pixman_region_contains_rectangle(reg, &box);
+        var num_clip_rects: c_int = 0;
+        const clip_rects = c.pixman_region_rectangles(reg, &num_clip_rects);
+        if ((clip_rects != null) and (num_clip_rects > 0) and
+                (reg_overlap == c.PIXMAN_REGION_PART))
+        {
+            const unum_clip_rects: usize = @intCast(num_clip_rects);
+            clips = try self.allocator.alloc(c.XRectangle, unum_clip_rects);
+            errdefer self.allocator.free(clips);
+            for (0..unum_clip_rects) |index|
+            {
+                const x = clip_rects[index].x1;
+                const y = clip_rects[index].y1;
+                const w = clip_rects[index].x2 - x;
+                const h = clip_rects[index].y2 - y;
+                clips[index].x = x;
+                clips[index].y = y;
+                clips[index].width = @bitCast(w);
+                clips[index].height = @bitCast(h);
+            }
+        }
+        return clips;
     }
 
     //*************************************************************************
@@ -279,11 +333,14 @@ pub const rdp_session_t = struct
             try self.logln_devel(log.LogLevel.info, @src(),
                     "decode width {} height {} self.ddata.ptr {*}",
                     .{bitmap_data.width, bitmap_data.height, self.ddata.ptr});
+            const al: u16 = 63;
+            const awidth: u16 = (bitmap_data.width + al) & ~al;
+            const aheight: u16 = (bitmap_data.height + al) & ~al;
             const rv = c.rfxcodec_decode_ex(arfxdecoder,
                     @ptrCast(bitmap_data.bitmap_data),
                     @bitCast(bitmap_data.bitmap_data_len),
-                    self.ddata.ptr, bitmap_data.width, bitmap_data.height,
-                    bitmap_data.width * 4, &rects, &num_rects,
+                    self.ddata.ptr, awidth, aheight,
+                    awidth * 4, &rects, &num_rects,
                     &tiles, &num_tiles, 0);
             try self.logln_devel(log.LogLevel.info, @src(),
                     "rfxcodec_decode rv {} num_rects {} num_tiles {}",
@@ -301,39 +358,15 @@ pub const rdp_session_t = struct
                     defer c.pixman_region_fini(&reg);
                     var clips: []c.XRectangle = &.{};
                     defer self.allocator.free(clips);
-                    if (c.pixman_region_intersect(&reg, rect_reg,
-                            tile_reg) != 0)
+                    const pixman_bool = c.pixman_region_intersect(&reg,
+                            rect_reg, tile_reg);
+                    if (pixman_bool != 0)
                     {
-                        var box: c.pixman_box16_t = .{.x1 = 0, .y1 = 0,
-                                .x2 = @bitCast(bitmap_data.width),
-                                .y2 = @bitCast(bitmap_data.height)};
-                        const reg_overlap =
-                                c.pixman_region_contains_rectangle(&reg, &box);
-                        var num_clip_rects: c_int = 0;
-                        const clip_rects = c.pixman_region_rectangles(&reg,
-                                &num_clip_rects);
-                        if ((clip_rects != null) and (num_clip_rects > 0) and
-                                (reg_overlap == c.PIXMAN_REGION_PART))
-                        {
-                            const unum_clip_rects: usize =
-                                    @intCast(num_clip_rects);
-                            clips = try self.allocator.alloc(c.XRectangle,
-                                    unum_clip_rects);
-                            for (0..unum_clip_rects) |index|
-                            {
-                                const x = clip_rects[index].x1;
-                                const y = clip_rects[index].y1;
-                                const w = clip_rects[index].x2 - x;
-                                const h = clip_rects[index].y2 - y;
-                                clips[index].x = x;
-                                clips[index].y = y;
-                                clips[index].width = @bitCast(w);
-                                clips[index].height = @bitCast(h);
-                            }
-                        }
+                        clips = try get_clips_from_reg(self,
+                                bitmap_data.width, bitmap_data.height, &reg);
                     }
-                    try ardp_x11.draw_image(bitmap_data.width,
-                            bitmap_data.height, bitmap_data.width * 4,
+                    try ardp_x11.draw_image(awidth, aheight,
+                            bitmap_data.width, bitmap_data.height,
                             self.ddata, clips);
                 }
             }
@@ -736,4 +769,33 @@ fn cb_set_surface_bits(rdpc: ?*c.rdpc_t,
         }
     }
     return rv;
+}
+
+//*****************************************************************************
+fn shm_info_init(size: usize, shm_info: *shm_info_t) !void
+{
+    shm_info.shmid = c.shmget(c.IPC_PRIVATE, size, c.IPC_CREAT | 0o777);
+    if (shm_info.shmid == -1) return error.shmget;
+    errdefer _ = c.shmctl(shm_info.shmid, c.IPC_RMID, null);
+    shm_info.ptr = c.shmat(shm_info.shmid, null, 0);
+    const err_ptr: *anyopaque = @ptrFromInt(std.math.maxInt(usize));
+    if (shm_info.ptr == err_ptr) return error.shmat;
+    errdefer _ = c.shmdt(shm_info.ptr);
+    shm_info.bytes = @truncate(size);
+}
+
+//*****************************************************************************
+fn shm_info_deinit(shm_info: *shm_info_t) void
+{
+    if (shm_info.ptr) |aptr|
+    {
+        _ = c.shmdt(aptr);
+        shm_info.ptr = null;
+    }
+    if (shm_info.shmid != -1)
+    {
+        _ = c.shmctl(shm_info.shmid, c.IPC_RMID, null);
+        shm_info.shmid = -1;
+    }
+    shm_info.bytes = 0;
 }

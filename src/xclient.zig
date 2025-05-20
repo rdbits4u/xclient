@@ -7,9 +7,12 @@ const rdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
 const c = @cImport(
 {
+    @cInclude("sys/ipc.h");
+    @cInclude("sys/shm.h");
     @cInclude("X11/Xlib.h");
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
+    @cInclude("X11/extensions/XShm.h");
     @cInclude("librdpc.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
@@ -34,6 +37,7 @@ fn show_command_line_args() !void
     try writer.print("  -c: initial working directory\n", .{});
     try writer.print("  -p: password\n", .{});
     try writer.print("  -n: hostname\n", .{});
+    try writer.print("  -g: set geometry, using format WxH, default is 1024x768\n", .{});
     try writer.print("server:port examples\n", .{});
     try writer.print("  {s} 192.168.1.1\n", .{app_name});
     try writer.print("  {s} 192.168.1.1:3390\n", .{app_name});
@@ -205,6 +209,32 @@ fn process_args(settings: *c.rdpc_settings_t,
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
             strings.copyZ(&settings.clientname, slice_arg);
+        }
+        else if (std.mem.eql(u8, slice_arg, "-g"))
+        {
+            if (index + 1 >= count)
+            {
+                return error.ShowCommandLine;
+            }
+            index += 1;
+            slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
+            var seq = std.mem.tokenizeSequence(u8, slice_arg, "x");
+            if (seq.next()) |chunk0|
+            {
+                settings.width = try std.fmt.parseInt(c_int, chunk0, 10);
+                if (seq.next()) |chunk1|
+                {
+                    settings.height = try std.fmt.parseInt(c_int, chunk1, 10);
+                }
+                else
+                {
+                    return error.ShowCommandLine;
+                }
+            }
+            else
+            {
+                return error.ShowCommandLine;
+            }
         }
         else
         {
