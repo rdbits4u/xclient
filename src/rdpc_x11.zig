@@ -69,15 +69,65 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     fn handle_key_press(self: *rdp_x11_t, event: *c.XKeyEvent) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
-        _ = event;
+        try self.session.logln(log.LogLevel.debug, @src(), "keycode {}",
+                .{event.keycode});
+        var keyboard_flags: u16 = 0;
+        var key_code: u16 = 0;
+        switch (event.keycode)
+        {
+            111 =>
+            {
+                keyboard_flags = 0x8100;
+                key_code = 72;
+            },
+            116 =>
+            {
+                keyboard_flags = 0x8100;
+                key_code = 80;
+            },
+            else =>
+            {
+                keyboard_flags = 0;
+                key_code = 0;
+            }
+        }
+        if (key_code != 0)
+        {
+            _ = c.rdpc_send_keyboard_scancode(self.session.rdpc,
+                    keyboard_flags, key_code);
+        }
     }
 
     //*************************************************************************
     fn handle_key_release(self: *rdp_x11_t, event: *c.XKeyEvent) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
-        _ = event;
+        try self.session.logln(log.LogLevel.debug, @src(), "keycode {}",
+                .{event.keycode});
+        var keyboard_flags: u16 = 0;
+        var key_code: u16 = 0;
+        switch (event.keycode)
+        {
+            111 =>
+            {
+                keyboard_flags = 0x0100;
+                key_code = 72;
+            },
+            116 =>
+            {
+                keyboard_flags = 0x0100;
+                key_code = 80;
+            },
+            else =>
+            {
+                keyboard_flags = 0;
+                key_code = 0;
+            }
+        }
+        if (key_code != 0)
+        {
+            _ = c.rdpc_send_keyboard_scancode(self.session.rdpc,
+                    keyboard_flags, key_code);
+        }
     }
 
     //*************************************************************************
@@ -87,34 +137,79 @@ pub const rdp_x11_t = struct
                 "x {} y {} button 0x{X}", .{event.x, event.y, event.button});
         var levent: u16 = switch (event.button)
         {
-            1 => c.PTRFLAGS_BUTTON1,
-            2 => c.PTRFLAGS_BUTTON3,
-            3 => c.PTRFLAGS_BUTTON2,
+            c.Button1 => c.PTRFLAGS_BUTTON1,
+            c.Button2 => c.PTRFLAGS_BUTTON3,
+            c.Button3 => c.PTRFLAGS_BUTTON2,
             else => 0,
         };
+        const x: u16 = @intCast(event.x);
+        const y: u16 = @intCast(event.y);
         if (levent != 0)
         {
             levent |= c.PTRFLAGS_DOWN;
-            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent,
-                    @intCast(event.x), @intCast(event.y));
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
         }
-    }
+        else if (event.button == 8) // back
+        {
+            levent = c.PTRXFLAGS_BUTTON1 | c.PTRFLAGS_DOWN;
+            _ = c.rdpc_send_mouse_event_ex(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == 9) // forward
+        {
+            levent = c.PTRXFLAGS_BUTTON2 | c.PTRFLAGS_DOWN;
+            _ = c.rdpc_send_mouse_event_ex(self.session.rdpc, levent, x, y);
+        }
+}
 
     //*************************************************************************
     fn handle_button_release(self: *rdp_x11_t, event: *c.XButtonEvent) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
-        const levent: u16 = switch (event.button)
+        var levent: u16 = switch (event.button)
         {
-            1 => c.PTRFLAGS_BUTTON1,
-            2 => c.PTRFLAGS_BUTTON3,
-            3 => c.PTRFLAGS_BUTTON2,
+            c.Button1 => c.PTRFLAGS_BUTTON1,
+            c.Button2 => c.PTRFLAGS_BUTTON3,
+            c.Button3 => c.PTRFLAGS_BUTTON2,
             else => 0,
         };
+        const x: u16 = @intCast(event.x);
+        const y: u16 = @intCast(event.y);
+        const delta: i16 = 120;
         if (levent != 0)
         {
-            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent,
-                    @intCast(event.x), @intCast(event.y));
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == c.Button4) // wheel up
+        {
+            levent = c.PTRFLAGS_WHEEL | (delta & c.WheelRotationMask);
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == c.Button5) // wheel down
+        {
+            const ldelta: u16 = @bitCast(-delta);
+            levent = c.PTRFLAGS_WHEEL | (ldelta & c.WheelRotationMask);
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == 6) // hwheel left
+        {
+            levent = c.PTRFLAGS_HWHEEL | (delta & c.WheelRotationMask);
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == 7) // hwheel right
+        {
+            const ldelta: u16 = @bitCast(-delta);
+            levent = c.PTRFLAGS_HWHEEL | (ldelta & c.WheelRotationMask);
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == 8) // back
+        {
+            levent = c.PTRXFLAGS_BUTTON1;
+            _ = c.rdpc_send_mouse_event_ex(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == 9) // forward
+        {
+            levent = c.PTRXFLAGS_BUTTON2;
+            _ = c.rdpc_send_mouse_event_ex(self.session.rdpc, levent, x, y);
         }
     }
 
@@ -260,8 +355,8 @@ pub const rdp_x11_t = struct
                 c.CWWinGravity | c.CWBitGravity;
         // create window
         try self.session.logln(log.LogLevel.debug, @src(),
-                "width {} height {} depth {} visual {} value_mask 0x{X}",
-                .{self.width, self.height, self.depth, self.visual, value_mask});
+                "width {} height {} depth {} value_mask 0x{X}",
+                .{self.width, self.height, self.depth, value_mask});
         self.window = c.XCreateWindow(self.display, self.root_window,
                 0, 0, self.width, self.height, 0, @bitCast(self.depth),
                 c.InputOutput, self.visual, value_mask, &attribs);
@@ -466,8 +561,8 @@ pub fn create(session: *rdpc_session.rdp_session_t,
     // window event mask
     const event_mask: c_long = c.StructureNotifyMask |
             c.VisibilityChangeMask | c.ButtonPressMask |
-            c.ButtonReleaseMask | c.KeyPressMask | c.ExposureMask |
-            c.PointerMotionMask | c.ExposureMask;
+            c.ButtonReleaseMask | c.KeyPressMask | c.KeyReleaseMask |
+            c.ExposureMask | c.PointerMotionMask | c.ExposureMask;
     _ = c.XSelectInput(self.display, self.window, event_mask);
     _ = c.XMapWindow(self.display, self.window);
     // create gc
@@ -478,6 +573,8 @@ pub fn create(session: *rdpc_session.rdp_session_t,
     try self.check_pixmap(self.width, self.height);
     // check for Xshm
     self.got_xshm = c.XShmQueryExtension(self.display) != 0;
+    try self.session.logln(log.LogLevel.debug, @src(),
+            "got_xshm {}", .{self.got_xshm});
     // flush to send all requests to xserver
     _ = c.XFlush(self.display);
     return self;

@@ -185,7 +185,6 @@ pub const rdp_session_t = struct
     {
         if (self.rfxdecoder) |arfxdecoder|
         {
-            self.allocator.free(self.ddata);
             _ = c.rfxcodec_decode_destroy(arfxdecoder);
             self.rfxdecoder = null;
         }
