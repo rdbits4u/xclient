@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const strings = @import("strings");
 const log = @import("log");
 const rdpc_session = @import("rdpc_session.zig");
@@ -120,7 +121,14 @@ pub const rdp_x11_t = struct
         const y: u16 = @intCast(event.y);
         if (levent != 0)
         {
-            levent |= c.PTRFLAGS_DOWN;
+            if ((builtin.zig_version.major == 0) and (builtin.zig_version.minor == 13))
+            {
+                levent |= @intCast(c.PTRFLAGS_DOWN);
+            }
+            else
+            {
+                levent |= c.PTRFLAGS_DOWN;
+            }
             _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
         }
         else if (event.button == 8) // back
