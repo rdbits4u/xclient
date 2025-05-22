@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void
     xclient.addIncludePath(b.path("../librfxcodec/include/"));
     xclient.linkSystemLibrary("x11");
     xclient.linkSystemLibrary("xext");
+    xclient.linkSystemLibrary("xcursor");
     xclient.linkSystemLibrary("pixman-1");
     xclient.addObjectFile(b.path("../librfxcodec/src/.libs/librfxdecode.a"));
     xclient.addObjectFile(b.path("../rdpc/zig-out/lib/librdpc.so"));

@@ -12,6 +12,7 @@ const c = @cImport(
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
     @cInclude("X11/extensions/XShm.h");
+    @cInclude("X11/Xcursor/Xcursor.h");
     @cInclude("librdpc.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
@@ -373,6 +374,30 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn pointer_update(self: *rdp_session_t, pointer: *c.pointer_t) !void
+    {
+        try self.logln(log.LogLevel.info, @src(), "bpp {}",
+                .{pointer.xor_bpp});
+
+        if (self.rdp_x11) |ardp_x11|
+        {
+            try ardp_x11.pointer_update(pointer);
+        }
+
+    }
+
+    //*************************************************************************
+    fn pointer_cached(self: *rdp_session_t, cache_index: u16) !void
+    {
+        try self.logln(log.LogLevel.info, @src(), "cache_index {}",
+                .{cache_index});
+        if (self.rdp_x11) |ardp_x11|
+        {
+            try ardp_x11.pointer_cached(cache_index);
+        }
+    }
+
+    //*************************************************************************
     pub fn connect(self: *rdp_session_t) !void
     {
         const server = std.mem.sliceTo(&self.rdp_connect.server_name, 0);
@@ -645,6 +670,8 @@ pub fn create(allocator: *const std.mem.Allocator,
         ardpc.log_msg = cb_log_msg;
         ardpc.send_to_server = cb_send_to_server;
         ardpc.set_surface_bits = cb_set_surface_bits;
+        ardpc.pointer_update = cb_pointer_update;
+        ardpc.pointer_cached = cb_pointer_cached;
         self.rdpc = ardpc;
     }
     else
@@ -748,7 +775,7 @@ fn cb_send_to_server(rdpc: ?*c.rdpc_t,
 //*****************************************************************************
 // callback
 // int (*set_surface_bits)(struct rdpc_t* rdpc,
-// struct bitmap_data_t* bitmap_data);
+//                         struct bitmap_data_t* bitmap_data);
 fn cb_set_surface_bits(rdpc: ?*c.rdpc_t,
         bitmap_data: ?*c.bitmap_data_t) callconv(.C) c_int
 {
@@ -765,6 +792,52 @@ fn cb_set_surface_bits(rdpc: ?*c.rdpc_t,
                         return c.LIBRDPC_ERROR_PARSE;
                 rv = 0;
             }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*pointer_update)(struct rdpc_t* rdpc,
+//                       struct pointer_t* pointer);
+fn cb_pointer_update(rdpc: ?*c.rdpc_t,
+        pointer: ?*c.pointer_t) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        if (pointer) |apointer|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpc.user[0]));
+            if (session) |ardp_session|
+            {
+                ardp_session.pointer_update(apointer) catch
+                        return c.LIBRDPC_ERROR_PARSE;
+                rv = 0;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*pointer_cached)(struct rdpc_t* rdpc,
+//                       uint16_t cache_index);
+fn cb_pointer_cached(rdpc: ?*c.rdpc_t, cache_index: u16) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpc.user[0]));
+        if (session) |ardp_session|
+        {
+            ardp_session.pointer_cached(cache_index) catch
+                    return c.LIBRDPC_ERROR_PARSE;
+            rv = 0;
         }
     }
     return rv;

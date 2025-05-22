@@ -13,6 +13,7 @@ const c = @cImport(
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
     @cInclude("X11/extensions/XShm.h");
+    @cInclude("X11/Xcursor/Xcursor.h");
     @cInclude("librdpc.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
@@ -48,6 +49,7 @@ pub const rdp_x11_t = struct
     wm_protocols: c.Atom = 0,
     wm_delete_window: c.Atom = 0,
     got_xshm: bool = false,
+    pointer_cache: [32]c_ulong = undefined,
 
     //*************************************************************************
     pub fn delete(self: *rdp_x11_t) void
@@ -110,27 +112,25 @@ pub const rdp_x11_t = struct
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "x {} y {} button 0x{X}", .{event.x, event.y, event.button});
-        var levent: u16 = switch (event.button)
-        {
-            c.Button1 => c.PTRFLAGS_BUTTON1,
-            c.Button2 => c.PTRFLAGS_BUTTON3,
-            c.Button3 => c.PTRFLAGS_BUTTON2,
-            else => 0,
-        };
+        var levent: u16 = undefined;
         const x: u16 = @intCast(event.x);
         const y: u16 = @intCast(event.y);
-        if (levent != 0)
+        if (event.button == c.Button1)
         {
-            if ((builtin.zig_version.major == 0) and (builtin.zig_version.minor == 13))
-            {
-                levent |= @intCast(c.PTRFLAGS_DOWN);
-            }
-            else
-            {
-                levent |= c.PTRFLAGS_DOWN;
-            }
+            levent = c.PTRFLAGS_BUTTON1 | c.PTRFLAGS_DOWN;
             _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
         }
+        else if (event.button == c.Button2)
+        {
+            levent = c.PTRFLAGS_BUTTON3 | c.PTRFLAGS_DOWN;
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == c.Button3)
+        {
+            levent = c.PTRFLAGS_BUTTON2 | c.PTRFLAGS_DOWN;
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        // 4, 5, 6, and 7 are wheels handled by handle_button_release
         else if (event.button == 8) // back
         {
             levent = c.PTRXFLAGS_BUTTON1 | c.PTRFLAGS_DOWN;
@@ -147,18 +147,23 @@ pub const rdp_x11_t = struct
     fn handle_button_release(self: *rdp_x11_t, event: *c.XButtonEvent) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
-        var levent: u16 = switch (event.button)
-        {
-            c.Button1 => c.PTRFLAGS_BUTTON1,
-            c.Button2 => c.PTRFLAGS_BUTTON3,
-            c.Button3 => c.PTRFLAGS_BUTTON2,
-            else => 0,
-        };
+        var levent: u16 = undefined;
         const x: u16 = @intCast(event.x);
         const y: u16 = @intCast(event.y);
         const delta: i16 = 120;
-        if (levent != 0)
+        if (event.button == c.Button1)
         {
+            levent = c.PTRFLAGS_BUTTON1;
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == c.Button2)
+        {
+            levent = c.PTRFLAGS_BUTTON3;
+            _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
+        }
+        else if (event.button == c.Button3)
+        {
+            levent = c.PTRFLAGS_BUTTON2;
             _ = c.rdpc_send_mouse_event(self.session.rdpc, levent, x, y);
         }
         else if (event.button == c.Button4) // wheel up
@@ -510,6 +515,44 @@ pub const rdp_x11_t = struct
         }
         return self.draw_image_noshm(src_width, src_height,
                 dst_width, dst_height, data, clips);
+    }
+
+    //*************************************************************************
+    pub fn pointer_update(self: *rdp_x11_t, pointer: *c.pointer_t) !void
+    {
+        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
+        var ci: c.XcursorImage = .{};
+        ci.version = c.XCURSOR_IMAGE_VERSION;
+        ci.size = @sizeOf(c.XcursorImage);
+        ci.width = pointer.width;
+        ci.height = pointer.height;
+        ci.xhot = pointer.hotx;
+        ci.yhot = pointer.hoty;
+        const pixels = try self.allocator.alloc(c_uint, ci.width * ci.height);
+        defer self.allocator.free(pixels);
+        ci.pixels = pixels.ptr;
+        //@memset(pixels, 0xFFFFFFFF);
+        for (0..ci.height) |jndex|
+        {
+            const kndex = (ci.height - 1) - jndex;
+            for (0..ci.width) |index|
+            {
+                _ = index;
+                _ = kndex;
+            }
+        }
+        const cur = c.XcursorImageLoadCursor(self.display, &ci);
+        _ = c.XDefineCursor(self.display, self.window, cur);
+        self.pointer_cache[pointer.cache_index & 31] = cur;
+    }
+
+    //*************************************************************************
+    pub fn pointer_cached(self: *rdp_x11_t, cache_index: u16) !void
+    {
+        try self.session.logln(log.LogLevel.debug, @src(), "cache_index {}",
+                .{cache_index});
+        _ = c.XDefineCursor(self.display, self.window,
+                self.pointer_cache[cache_index & 31]);
     }
 
 };

@@ -13,6 +13,7 @@ const c = @cImport(
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
     @cInclude("X11/extensions/XShm.h");
+    @cInclude("X11/Xcursor/Xcursor.h");
     @cInclude("librdpc.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
