@@ -21,6 +21,17 @@ const c = @cImport(
 
 var g_allocator: std.mem.Allocator = std.heap.c_allocator;
 
+const MyError = error
+{
+    ShowCommandLine,
+};
+
+//*****************************************************************************
+pub inline fn err_if(b: bool, err: MyError) !void
+{
+    if (b) return err else return;
+}
+
 //*****************************************************************************
 fn show_command_line_args() !void
 {
@@ -137,7 +148,7 @@ fn process_args(settings: *c.rdpc_settings_t,
     {
         try log.logln(log.LogLevel.info, @src(),
                 "not enough parameters", .{});
-        return error.ShowCommandLine;
+        return MyError.ShowCommandLine;
     }
     while (index < count) : (index += 1)
     {
@@ -146,13 +157,13 @@ fn process_args(settings: *c.rdpc_settings_t,
                 .{index, count, slice_arg});
         if (std.mem.eql(u8, slice_arg, "-h"))
         {
-            return error.ShowCommandLine;
+            return MyError.ShowCommandLine;
         }
         else if (std.mem.eql(u8, slice_arg, "-u"))
         {
             if (index + 1 >= count)
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
@@ -165,7 +176,7 @@ fn process_args(settings: *c.rdpc_settings_t,
         {
             if (index + 1 >= count)
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
@@ -175,7 +186,7 @@ fn process_args(settings: *c.rdpc_settings_t,
         {
             if (index + 1 >= count)
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
@@ -185,7 +196,7 @@ fn process_args(settings: *c.rdpc_settings_t,
         {
             if (index + 1 >= count)
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
@@ -195,7 +206,7 @@ fn process_args(settings: *c.rdpc_settings_t,
         {
             if (index + 1 >= count)
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
@@ -205,7 +216,7 @@ fn process_args(settings: *c.rdpc_settings_t,
         {
             if (index + 1 >= count)
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
@@ -215,7 +226,7 @@ fn process_args(settings: *c.rdpc_settings_t,
         {
             if (index + 1 >= count)
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
@@ -229,12 +240,12 @@ fn process_args(settings: *c.rdpc_settings_t,
                 }
                 else
                 {
-                    return error.ShowCommandLine;
+                    return MyError.ShowCommandLine;
                 }
             }
             else
             {
-                return error.ShowCommandLine;
+                return MyError.ShowCommandLine;
             }
         }
         else
@@ -269,7 +280,7 @@ fn create_rdpc_session(rdp_connect: *rdpc_session.rdp_connect_t)
     const result = process_args(settings, rdp_connect);
     if (result) |_| { } else |err|
     {
-        if (err == error.ShowCommandLine)
+        if (err == MyError.ShowCommandLine)
         {
             try show_command_line_args();
         }
@@ -339,7 +350,7 @@ pub fn main() !void
     defer g_allocator.destroy(rdp_connect);
     rdp_connect.* = .{};
     const session = create_rdpc_session(rdp_connect) catch |err|
-            if (err == error.ShowCommandLine) return else return err;
+            if (err == MyError.ShowCommandLine) return else return err;
     defer session.delete();
     try session.connect();
     try session.loop();

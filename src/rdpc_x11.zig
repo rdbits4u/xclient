@@ -19,6 +19,19 @@ const c = @cImport(
     @cInclude("rfxcodec_decode.h");
 });
 
+const MyError = error
+{
+    GetFds,
+    BadPointerCacheIndex,
+    BadOpenDisplay,
+};
+
+//*****************************************************************************
+pub inline fn err_if(b: bool, err: MyError) !void
+{
+    if (b) return err else return;
+}
+
 const rdp_key_code_t = struct
 {
     code: u16 = undefined,
@@ -49,7 +62,7 @@ pub const rdp_x11_t = struct
     wm_protocols: c.Atom = 0,
     wm_delete_window: c.Atom = 0,
     got_xshm: bool = false,
-    pointer_cache: [32]c_ulong = undefined,
+    pointer_cache: []c_ulong = &.{},
 
     //*************************************************************************
     pub fn delete(self: *rdp_x11_t) void
@@ -61,6 +74,7 @@ pub const rdp_x11_t = struct
             _ = c.XDestroyWindow(self.display, self.window);
         }
         _ = c.XCloseDisplay(self.display);
+        self.allocator.free(self.pointer_cache);
         self.allocator.destroy(self);
     }
 
@@ -68,10 +82,7 @@ pub const rdp_x11_t = struct
     pub fn get_fds(self: *rdp_x11_t, fds: []i32, timeout: *i32) ![]i32
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(), "fd {}", .{self.fd});
-        if (fds.len < 1)
-        {
-            return error.Unexpected;
-        }
+        try err_if(fds.len < 1, MyError.GetFds);
         fds[0] = self.fd;
         _ = timeout;
         return fds[0..1];
@@ -518,9 +529,74 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
+    fn get_pointer_pixel(self: *rdp_x11_t, data: []const u8, bpp: u16,
+            width: u32, height: u32, x: usize, y: usize) !c_uint
+    {
+        try self.session.logln_devel(log.LogLevel.debug, @src(),
+                "bpp {} width {} height {} x {} y {}",
+                .{bpp, width, height, x, y});
+        if (bpp == 32)
+        {
+            const offset = y * width * 4 + x * 4;
+            var pixel: u32 = data[offset + 3];
+            pixel = (pixel << 8) | data[offset + 2];
+            pixel = (pixel << 8) | data[offset + 1];
+            pixel = (pixel << 8) | data[offset];
+            return pixel;
+        }
+        else if (bpp == 24)
+        {
+            const offset = y * width * 3 + x * 3;
+            var pixel: u32 = data[offset];
+            pixel = (pixel << 8) | data[offset + 1];
+            pixel = (pixel << 8) | data[offset + 2];
+            return pixel | 0xFF000000;
+        }
+        else if (bpp == 16)
+        {
+            const offset = y * width * 2 + x * 2;
+            var pixel: u32 = data[offset + 1];
+            pixel = (pixel << 8) | data[offset];
+            var r = (pixel & 0xF800) >> 11;
+            var g = (pixel & 0x07E0) >> 5;
+            var b = pixel * 0x001F;
+            r = (r << 3) | (r >> 2);
+            g = (g << 2) | (g >> 4);
+            b = (b << 3) | (b >> 2);
+            return (r << 16) | (g << 8) | b | 0xFF000000;
+        }
+        else if (bpp == 15)
+        {
+            const offset = y * width * 2 + x * 2;
+            var pixel: u32 = data[offset + 1];
+            pixel = (pixel << 8) | data[offset];
+            var r = (pixel & 0x7C00) >> 10;
+            var g = (pixel & 0x3E0) >> 5;
+            var b = pixel * 0x001F;
+            r = (r << 3) | (r >> 2);
+            g = (g << 3) | (g >> 2);
+            b = (b << 3) | (b >> 2);
+            return (r << 16) | (g << 8) | b | 0xFF000000;
+        }
+        else if (bpp == 1)
+        {
+            const lwidth = (width + 7) / 8;
+            const start = (y * lwidth) + x / 8;
+            var shift = x % 8;
+            var pixel: u32 = data[start];
+            var mask: u32 = 0x80;
+            while (shift > 0) : (shift -= 1) mask >>= 1;
+            pixel = if ((pixel & mask) != 0) 0xFFFFFFFF else 0xFF000000;
+            return pixel;
+        }
+        return 0;
+    }
+
+    //*************************************************************************
     pub fn pointer_update(self: *rdp_x11_t, pointer: *c.pointer_t) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
+        try self.session.logln(log.LogLevel.debug, @src(), "xor_bpp {}",
+                .{pointer.xor_bpp});
         var ci: c.XcursorImage = .{};
         ci.version = c.XCURSOR_IMAGE_VERSION;
         ci.size = @sizeOf(c.XcursorImage);
@@ -531,19 +607,54 @@ pub const rdp_x11_t = struct
         const pixels = try self.allocator.alloc(c_uint, ci.width * ci.height);
         defer self.allocator.free(pixels);
         ci.pixels = pixels.ptr;
-        //@memset(pixels, 0xFFFFFFFF);
-        for (0..ci.height) |jndex|
+        if (pointer.xor_mask_data) |axor_data|
         {
-            const kndex = (ci.height - 1) - jndex;
-            for (0..ci.width) |index|
+            var xor_data: []const u8 = undefined;
+            xor_data.ptr = @ptrCast(axor_data);
+            xor_data.len = pointer.length_xor_mask;
+            if (pointer.and_mask_data) |aand_data|
             {
-                _ = index;
-                _ = kndex;
+                const bpp = pointer.xor_bpp;
+                const w = pointer.width;
+                const h = pointer.height;
+                var and_data: []const u8 = undefined;
+                and_data.ptr = @ptrCast(aand_data);
+                xor_data.len = pointer.length_and_mask;
+                for (0..h) |y|
+                {
+                    const yup = (h - 1) - y;
+                    for (0..w) |x|
+                    {
+                        const apixel = try self.get_pointer_pixel(
+                                and_data, 1, w, h, x, yup);
+                        var xpixel = try self.get_pointer_pixel(
+                                xor_data, bpp, w, h, x, yup);
+                        try self.session.logln_devel(log.LogLevel.debug,
+                                @src(), "apixel 0x{X} xpixel 0x{X}",
+                                .{apixel, xpixel});
+                        if ((apixel & 0xFFFFFF) != 0)
+                        {
+                            if ((xpixel & 0xFFFFFF) == 0xFFFFFF)
+                            {
+                                // use pattern (not solid black) for xor area
+                                xpixel = if ((x & 1) == (y & 1)) 0xFFFFFFFF
+                                        else 0xFF000000;
+                            }
+                            else if (xpixel == 0xFF000000)
+                            {
+                                xpixel = 0;
+                            }
+                        }
+                        pixels[w * y + x] = xpixel;
+                    }
+                }
             }
         }
         const cur = c.XcursorImageLoadCursor(self.display, &ci);
         _ = c.XDefineCursor(self.display, self.window, cur);
-        self.pointer_cache[pointer.cache_index & 31] = cur;
+        try err_if(pointer.cache_index >= self.pointer_cache.len,
+                MyError.BadPointerCacheIndex);
+        self.pointer_cache[pointer.cache_index] = cur;
     }
 
     //*************************************************************************
@@ -551,8 +662,10 @@ pub const rdp_x11_t = struct
     {
         try self.session.logln(log.LogLevel.debug, @src(), "cache_index {}",
                 .{cache_index});
+        try err_if(cache_index >= self.pointer_cache.len,
+                MyError.BadPointerCacheIndex);
         _ = c.XDefineCursor(self.display, self.window,
-                self.pointer_cache[cache_index & 31]);
+                self.pointer_cache[cache_index]);
     }
 
 };
@@ -567,12 +680,17 @@ pub fn create(session: *rdpc_session.rdp_session_t,
     self.* = .{};
     self.session = session;
     self.allocator = allocator;
+    const pointer_cache_size = @max(
+            session.rdpc.ccaps.pointer.colorPointerCacheSize,
+            session.rdpc.ccaps.pointer.pointerCacheSize);
+    self.pointer_cache = try allocator.alloc(c_ulong, pointer_cache_size);
     try self.session.logln(log.LogLevel.debug, @src(),
-            "rdp_x11_t width {} height {}", .{width, height});
+            "rdp_x11_t width {} height {} pointer_cache_size {}",
+            .{width, height, pointer_cache_size});
     self.width = width;
     self.height = height;
     const dis = c.XOpenDisplay(null);
-    self.display = if (dis) |adis| adis else return error.Unexpected;
+    self.display = if (dis) |adis| adis else return MyError.BadOpenDisplay;
     self.fd = c.XConnectionNumber(self.display);
     self.screen_number = c.DefaultScreen(self.display);
     self.white = c.WhitePixel(self.display, self.screen_number);

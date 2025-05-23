@@ -31,6 +31,12 @@ const MyError = error
     RdpcInit,
 };
 
+//*****************************************************************************
+pub inline fn err_if(b: bool, err: MyError) !void
+{
+    if (b) return err else return;
+}
+
 pub var g_term: [2]i32 = .{-1, -1};
 
 const shm_info_t = struct
