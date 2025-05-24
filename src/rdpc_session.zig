@@ -380,9 +380,21 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn frame_marker(self: *rdp_session_t, frame_action: u16,
+            frame_id: u32) !void
+    {
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "frame_action {} frame_id {}", .{frame_action, frame_id});
+        if (frame_action == c.SURFACECMD_FRAMEACTION_END)
+        {
+            _ = c.rdpc_send_frame_ack(self.rdpc, frame_id);
+        }
+    }
+
+    //*************************************************************************
     fn pointer_update(self: *rdp_session_t, pointer: *c.pointer_t) !void
     {
-        try self.logln(log.LogLevel.info, @src(), "bpp {}",
+        try self.logln_devel(log.LogLevel.info, @src(), "bpp {}",
                 .{pointer.xor_bpp});
 
         if (self.rdp_x11) |ardp_x11|
@@ -395,7 +407,7 @@ pub const rdp_session_t = struct
     //*************************************************************************
     fn pointer_cached(self: *rdp_session_t, cache_index: u16) !void
     {
-        try self.logln(log.LogLevel.info, @src(), "cache_index {}",
+        try self.logln_devel(log.LogLevel.info, @src(), "cache_index {}",
                 .{cache_index});
         if (self.rdp_x11) |ardp_x11|
         {
@@ -676,6 +688,7 @@ pub fn create(allocator: *const std.mem.Allocator,
         ardpc.log_msg = cb_log_msg;
         ardpc.send_to_server = cb_send_to_server;
         ardpc.set_surface_bits = cb_set_surface_bits;
+        ardpc.frame_marker = cb_frame_marker;
         ardpc.pointer_update = cb_pointer_update;
         ardpc.pointer_cached = cb_pointer_cached;
         self.rdpc = ardpc;
@@ -798,6 +811,29 @@ fn cb_set_surface_bits(rdpc: ?*c.rdpc_t,
                         return c.LIBRDPC_ERROR_PARSE;
                 rv = 0;
             }
+        }
+    }
+    return rv;
+}
+
+
+//*****************************************************************************
+// callback
+// int (*set_surface_bits)(struct rdpc_t* rdpc,
+//                         uint16_t frame_action, uint32_t frame_id);
+fn cb_frame_marker(rdpc: ?*c.rdpc_t,
+        frame_action: u16, frame_id: u32) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpc.user[0]));
+        if (session) |ardp_session|
+        {
+            ardp_session.frame_marker(frame_action, frame_id) catch
+                    return c.LIBRDPC_ERROR_PARSE;
+            rv = 0;
         }
     }
     return rv;

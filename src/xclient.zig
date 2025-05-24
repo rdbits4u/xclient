@@ -130,6 +130,8 @@ fn process_args(settings: *c.rdpc_settings_t,
     settings.rdpdr = 1;
     settings.rfx = 1;
     settings.jpg = 0;
+    settings.use_frame_ack = 1;
+    settings.frames_in_flight = 5;
     // get some info from os
     if (std.posix.getenv("USER")) |auser_env|
     {
