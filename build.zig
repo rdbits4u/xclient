@@ -2,6 +2,12 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void
 {
+    // build options
+    const do_strip = b.option(
+        bool,
+        "strip",
+        "Strip the executabes"
+    ) orelse false;
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     // xclient
@@ -10,11 +16,13 @@ pub fn build(b: *std.Build) void
         .root_source_file = b.path("src/xclient.zig"),
         .target = target,
         .optimize = optimize,
-        .strip = true,
+        .strip = do_strip,
     });
     xclient.linkLibC();
     xclient.addIncludePath(b.path("../common"));
     xclient.addIncludePath(b.path("../rdpc/include"));
+    xclient.addIncludePath(b.path("../svc/include"));
+    xclient.addIncludePath(b.path("../cliprdr/include"));
     xclient.addIncludePath(b.path("../librfxcodec/include/"));
     xclient.linkSystemLibrary("x11");
     xclient.linkSystemLibrary("xext");
@@ -22,7 +30,11 @@ pub fn build(b: *std.Build) void
     xclient.linkSystemLibrary("pixman-1");
     xclient.addObjectFile(b.path("../librfxcodec/src/.libs/librfxdecode.a"));
     xclient.addObjectFile(b.path("../rdpc/zig-out/lib/librdpc.so"));
+    xclient.addObjectFile(b.path("../svc/zig-out/lib/libsvc.so"));
+    xclient.addObjectFile(b.path("../cliprdr/zig-out/lib/libcliprdr.so"));
     xclient.addLibraryPath(.{.cwd_relative = "../rdpc/zig-out/lib"});
+    xclient.addLibraryPath(.{.cwd_relative = "../svc/zig-out/lib"});
+    xclient.addLibraryPath(.{.cwd_relative = "../cliprdr/zig-out/lib"});
     xclient.root_module.addImport("hexdump", b.createModule(.{
         .root_source_file = b.path("../common/hexdump.zig"),
     }));

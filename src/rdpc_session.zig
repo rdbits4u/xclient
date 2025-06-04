@@ -14,6 +14,8 @@ const c = @cImport(
     @cInclude("X11/extensions/XShm.h");
     @cInclude("X11/Xcursor/Xcursor.h");
     @cInclude("librdpc.h");
+    @cInclude("libsvc.h");
+    @cInclude("libcliprdr.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
 });
@@ -29,12 +31,34 @@ const MyError = error
     RdpcStart,
     RdpcCreate,
     RdpcInit,
+    SvcInit,
+    SvcCreate,
+    CliprdrInit,
+    CliprdrCreate,
 };
 
 //*****************************************************************************
 pub inline fn err_if(b: bool, err: MyError) !void
 {
     if (b) return err else return;
+}
+
+//*****************************************************************************
+pub fn c_int_to_error(rv: c_int) !void
+{
+    switch (rv)
+    {
+        else => return,
+    }
+}
+
+//*****************************************************************************
+pub fn error_to_c_int(err: anyerror) c_int
+{
+    switch (err)
+    {
+        else => return c.LIBRDPC_ERROR_OTHER,
+    }
 }
 
 pub var g_term: [2]i32 = .{-1, -1};
@@ -50,7 +74,7 @@ const shm_info_t = struct
 const send_t = struct
 {
     sent: usize = 0,
-    out_data_slice: []u8 = undefined,
+    out_data_slice: []u8,
     next: ?*send_t = null,
 };
 
@@ -62,19 +86,21 @@ pub const rdp_connect_t = struct
 
 pub const rdp_session_t = struct
 {
-    allocator: *const std.mem.Allocator = undefined,
-    rdpc: *c.rdpc_t = undefined,
+    allocator: *const std.mem.Allocator,
+    rdp_connect: *rdp_connect_t,
+    rdpc: *c.rdpc_t,
+    svc: *c.svc_channels_t,
+    cliprdr: *c.cliprdr_t,
     connected: bool = false,
     sck: i32 = -1,
     recv_start: usize = 0,
-    in_data_slice: []u8 = undefined,
+    in_data_slice: []u8 = &.{},
     send_head: ?*send_t = null,
     send_tail: ?*send_t = null,
-    rdp_connect: *rdp_connect_t = undefined,
     rdp_x11: ?*rdpc_x11.rdp_x11_t = null,
 
     rfxdecoder: ?*anyopaque = null,
-    ddata: []u8 = undefined,
+    ddata: []u8 = &.{},
     shm_info: shm_info_t = .{},
 
     //*************************************************************************
@@ -86,6 +112,7 @@ pub const rdp_session_t = struct
         {
             ardp_x11.delete();
         }
+        _ = c.svc_delete(self.svc);
         _ = c.rdpc_delete(self.rdpc);
         if (self.sck != -1)
         {
@@ -136,9 +163,11 @@ pub const rdp_session_t = struct
             }
         }
         // save any left over data to send later
+        const out_data_slice = try self.allocator.alloc(u8, slice.len);
+        errdefer self.allocator.free(out_data_slice);
         const send: *send_t = try self.allocator.create(send_t);
-        send.* = .{};
-        send.out_data_slice = try self.allocator.alloc(u8, slice.len);
+        errdefer self.allocator.destroy(send);
+        send.* = .{.out_data_slice = out_data_slice};
         std.mem.copyForwards(u8, send.out_data_slice, slice);
         if (self.send_tail) |asend_tail|
         {
@@ -387,7 +416,9 @@ pub const rdp_session_t = struct
                 "frame_action {} frame_id {}", .{frame_action, frame_id});
         if (frame_action == c.SURFACECMD_FRAMEACTION_END)
         {
-            _ = c.rdpc_send_frame_ack(self.rdpc, frame_id);
+            const rv = c.rdpc_send_frame_ack(self.rdpc, frame_id);
+            _ = rv;
+            //try c_int_to_error(rv);
         }
     }
 
@@ -487,22 +518,17 @@ pub const rdp_session_t = struct
             {
                 const server_data_slice = self.in_data_slice[0..end];
                 // bytes_processed
-                var bp_c_int: c_int = 0;
+                var bp: u32 = 0;
                 // bytes_in_buf
-                const bib_u32: u32 = @truncate(server_data_slice.len);
-                const bib_c_int: c_int = @bitCast(bib_u32);
+                const bib: u32 = @truncate(server_data_slice.len);
                 const rv = c.rdpc_process_server_data(self.rdpc,
-                        server_data_slice.ptr, bib_c_int, &bp_c_int);
+                        server_data_slice.ptr, bib, &bp);
                 if (rv == c.LIBRDPC_ERROR_NONE)
                 {
-                    const bp_u32: u32 = @bitCast(bp_c_int);
                     // copy any left over data up to front of in_data_slice
                     const slice = self.in_data_slice;
-                    for (bp_u32..end) |index|
-                    {
-                        slice[index - bp_u32] = slice[index];
-                    }
-                    end -= bp_u32;
+                    std.mem.copyForwards(u8, slice[0..], slice[bp..end]);
+                    end -= bp;
                     self.recv_start = end;
                 }
                 else if (rv == c.LIBRDPC_ERROR_NEED_MORE)
@@ -578,7 +604,7 @@ pub const rdp_session_t = struct
     //*************************************************************************
     pub fn loop(self: *rdp_session_t) !void
     {
-        self.in_data_slice = try self.allocator.alloc(u8, 64 * 1024);
+        self.in_data_slice = try self.allocator.alloc(u8, 128 * 1024);
         defer self.allocator.free(self.in_data_slice);
         const max_polls = 32;
         const max_fds = 16;
@@ -662,7 +688,78 @@ pub const rdp_session_t = struct
         try self.logln(log.LogLevel.info, @src(), "[{s}]", .{msg});
     }
 
+    //*************************************************************************
+    fn cliprdr_ready(self: *rdp_session_t, channel_id: u16,
+            version: u32, general_flags: u32) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "channel_id 0x{X} version {} general_flags 0x{X}",
+            .{channel_id, version, general_flags});
+        return c.cliprdr_send_capabilities(self.cliprdr, channel_id,
+                version, general_flags);
+    }
+
+    //*************************************************************************
+    fn cliprdr_format_list(self: *rdp_session_t, channel_id: u16,
+            num_formats: u32, formats: [*]c.cliprdr_format_t) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "channel_id 0x{X} num_formats {}",
+            .{channel_id, num_formats});
+        if (self.rdp_x11) |ardp_x11|
+        {
+            try ardp_x11.cliprdr_format_list(channel_id, num_formats, formats);
+            return c.LIBCLIPRDR_ERROR_NONE;
+        }
+        return c.LIBCLIPRDR_ERROR_FORMAT_LIST;
+    }
+
 };
+
+//*****************************************************************************
+fn create_rdpc(settings: *c.rdpc_settings_t) !*c.rdpc_t
+{
+    var rdpc: ?*c.rdpc_t = null;
+    const rv = c.rdpc_create(settings, &rdpc);
+    if (rv == c.LIBRDPC_ERROR_NONE)
+    {
+        if (rdpc) |ardpc|
+        {
+            return ardpc;
+        }
+    }
+    return MyError.RdpcCreate;
+}
+
+//*****************************************************************************
+fn create_svc() !*c.svc_channels_t
+{
+    var svc: ?*c.svc_channels_t = null;
+    const rv = c.svc_create(&svc);
+    if (rv == c.LIBSVC_ERROR_NONE)
+    {
+        if (svc) |asvc|
+        {
+            return asvc;
+        }
+    }
+    return MyError.SvcCreate;
+}
+
+//*****************************************************************************
+fn create_cliprdr() !*c.cliprdr_t
+{
+    var cliprdr: ?*c.cliprdr_t = null;
+    const rv = c.cliprdr_create(&cliprdr);
+    if (rv == c.LIBCLIPRDR_ERROR_NONE)
+    {
+        if (cliprdr) |acliprdr|
+        {
+            return acliprdr;
+        }
+    }
+    return MyError.CliprdrCreate;
+}
 
 //*****************************************************************************
 pub fn create(allocator: *const std.mem.Allocator,
@@ -671,218 +768,59 @@ pub fn create(allocator: *const std.mem.Allocator,
 {
     const self = try allocator.create(rdp_session_t);
     errdefer allocator.destroy(self);
-    self.* = .{};
-    self.allocator = allocator;
-    self.rdp_connect = rdp_connect;
-    try self.logln(log.LogLevel.debug, @src(), "rdp_session_t", .{});
-    var rdpc: ?*c.rdpc_t = null;
-    const rv = c.rdpc_create(settings, &rdpc);
+    // setup rdpc
+    var rdpc = try create_rdpc(settings);
     errdefer _ = c.rdpc_delete(rdpc);
-    if (rv != c.LIBRDPC_ERROR_NONE)
-    {
-        return MyError.RdpcCreate;
-    }
-    if (rdpc) |ardpc|
-    {
-        ardpc.user[0] = self;
-        ardpc.log_msg = cb_log_msg;
-        ardpc.send_to_server = cb_send_to_server;
-        ardpc.set_surface_bits = cb_set_surface_bits;
-        ardpc.frame_marker = cb_frame_marker;
-        ardpc.pointer_update = cb_pointer_update;
-        ardpc.pointer_cached = cb_pointer_cached;
-        self.rdpc = ardpc;
-    }
-    else
-    {
-        return MyError.RdpcCreate;
-    }
+    rdpc.user = self;
+    rdpc.log_msg = cb_rdpc_log_msg;
+    rdpc.send_to_server = cb_rdpc_send_to_server;
+    rdpc.set_surface_bits = cb_rdpc_set_surface_bits;
+    rdpc.frame_marker = cb_rdpc_frame_marker;
+    rdpc.pointer_update = cb_rdpc_pointer_update;
+    rdpc.pointer_cached = cb_rdpc_pointer_cached;
+    rdpc.channel = cb_rdpc_channel;
+    // setup svc
+    var svc = try create_svc();
+    errdefer _ = c.svc_delete(svc);
+    svc.user = self;
+    svc.log_msg = cb_svc_log_msg;
+    svc.send_data = cb_svc_send_data;
+    // setup cliprdr
+    var cliprdr = try create_cliprdr();
+    errdefer _ = c.cliprdr_delete(cliprdr);
+    cliprdr.user = self;
+    cliprdr.log_msg = cb_cliprdr_log_msg;
+    cliprdr.send_data = cb_cliprdr_send_data;
+    cliprdr.ready = cb_cliprdr_ready;
+    cliprdr.format_list = cb_cliprdr_format_list;
+    const gcc_net = &rdpc.cgcc.net;
+    const index = gcc_net.channelCount;
+    const chan = &gcc_net.channelDefArray[index];
+    std.mem.copyForwards(u8, &chan.name, "CLIPRDR");
+    chan.options = 0;
+    svc.channels[index].user = self;
+    svc.channels[index].process_data = cb_svc_cliprdr_process_data;
+    gcc_net.channelCount += 1;
+    // init self
+    self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
+            .rdpc = rdpc, .svc = svc, .cliprdr = cliprdr};
     return self;
 }
 
 //*****************************************************************************
 pub fn init() !void
 {
-    if (c.rdpc_init() != c.LIBRDPC_ERROR_NONE)
-    {
-        return  MyError.RdpcInit;
-    }
+    try err_if(c.rdpc_init() != c.LIBRDPC_ERROR_NONE, MyError.RdpcInit);
+    try err_if(c.svc_init() != c.LIBSVC_ERROR_NONE, MyError.SvcInit);
+    try err_if(c.cliprdr_init() != c.LIBCLIPRDR_ERROR_NONE, MyError.CliprdrInit);
 }
 
 //*****************************************************************************
 pub fn deinit() void
 {
     _ = c.rdpc_deinit();
-}
-
-//*****************************************************************************
-// callback
-// int (*log_msg)(struct rdpc_t* rdpc, const char* msg);
-fn cb_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
-{
-    if (msg) |amsg|
-    {
-        // get string length with max
-        var count: usize = 0;
-        while (amsg[count] != 0)
-        {
-            count += 1;
-            if (count >= 8192)
-            {
-                break;
-            }
-        }
-        if (count > 0)
-        {
-            if (rdpc) |ardpc|
-            {
-                const session: ?*rdp_session_t =
-                        @alignCast(@ptrCast(ardpc.user[0]));
-                if (session) |asession|
-                {
-                    // alloc for copy
-                    const lmsg: []u8 = asession.allocator.alloc(u8,
-                            count) catch
-                        return c.LIBRDPC_ERROR_MEMORY;
-                    defer asession.allocator.free(lmsg);
-                    // make a copy
-                    var index: usize = 0;
-                    while (index < count)
-                    {
-                        lmsg[index] = amsg[index];
-                        index += 1;
-                    }
-                    asession.log_msg_slice(lmsg) catch
-                        return c.LIBRDPC_ERROR_MEMORY;
-                    return c.LIBRDPC_ERROR_NONE;
-                }
-            }
-        }
-    }
-    log.logln(log.LogLevel.debug, @src(), "nil", .{}) catch
-        return c.LIBRDPC_ERROR_MEMORY;
-    return c.LIBRDPC_ERROR_NONE;
-}
-
-//*****************************************************************************
-// callback
-// int (*send_to_server)(struct rdpc_t* rdpc, void* data, int bytes);
-fn cb_send_to_server(rdpc: ?*c.rdpc_t,
-        data: ?*anyopaque, bytes: c_int) callconv(.C) c_int
-{
-    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
-    if (rdpc) |ardpc|
-    {
-        if (data) |adata|
-        {
-            const session: ?*rdp_session_t =
-                    @alignCast(@ptrCast(ardpc.user[0]));
-            if (session) |ardp_session|
-            {
-                var slice: []u8 = undefined;
-                slice.ptr = @ptrCast(adata);
-                slice.len = @intCast(bytes);
-                rv = c.LIBRDPC_ERROR_NONE;
-                ardp_session.send_slice_to_server(slice) catch
-                        return c.LIBRDPC_ERROR_PARSE;
-            }
-        }
-    }
-    return rv;
-}
-
-//*****************************************************************************
-// callback
-// int (*set_surface_bits)(struct rdpc_t* rdpc,
-//                         struct bitmap_data_t* bitmap_data);
-fn cb_set_surface_bits(rdpc: ?*c.rdpc_t,
-        bitmap_data: ?*c.bitmap_data_t) callconv(.C) c_int
-{
-    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
-    if (rdpc) |ardpc|
-    {
-        if (bitmap_data) |abitmap_data|
-        {
-            const session: ?*rdp_session_t =
-                    @alignCast(@ptrCast(ardpc.user[0]));
-            if (session) |ardp_session|
-            {
-                ardp_session.set_surface_bits(abitmap_data) catch
-                        return c.LIBRDPC_ERROR_PARSE;
-                rv = 0;
-            }
-        }
-    }
-    return rv;
-}
-
-
-//*****************************************************************************
-// callback
-// int (*set_surface_bits)(struct rdpc_t* rdpc,
-//                         uint16_t frame_action, uint32_t frame_id);
-fn cb_frame_marker(rdpc: ?*c.rdpc_t,
-        frame_action: u16, frame_id: u32) callconv(.C) c_int
-{
-    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
-    if (rdpc) |ardpc|
-    {
-        const session: ?*rdp_session_t =
-                @alignCast(@ptrCast(ardpc.user[0]));
-        if (session) |ardp_session|
-        {
-            ardp_session.frame_marker(frame_action, frame_id) catch
-                    return c.LIBRDPC_ERROR_PARSE;
-            rv = 0;
-        }
-    }
-    return rv;
-}
-
-//*****************************************************************************
-// callback
-// int (*pointer_update)(struct rdpc_t* rdpc,
-//                       struct pointer_t* pointer);
-fn cb_pointer_update(rdpc: ?*c.rdpc_t,
-        pointer: ?*c.pointer_t) callconv(.C) c_int
-{
-    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
-    if (rdpc) |ardpc|
-    {
-        if (pointer) |apointer|
-        {
-            const session: ?*rdp_session_t =
-                    @alignCast(@ptrCast(ardpc.user[0]));
-            if (session) |ardp_session|
-            {
-                ardp_session.pointer_update(apointer) catch
-                        return c.LIBRDPC_ERROR_PARSE;
-                rv = 0;
-            }
-        }
-    }
-    return rv;
-}
-
-//*****************************************************************************
-// callback
-// int (*pointer_cached)(struct rdpc_t* rdpc,
-//                       uint16_t cache_index);
-fn cb_pointer_cached(rdpc: ?*c.rdpc_t, cache_index: u16) callconv(.C) c_int
-{
-    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
-    if (rdpc) |ardpc|
-    {
-        const session: ?*rdp_session_t =
-                @alignCast(@ptrCast(ardpc.user[0]));
-        if (session) |ardp_session|
-        {
-            ardp_session.pointer_cached(cache_index) catch
-                    return c.LIBRDPC_ERROR_PARSE;
-            rv = 0;
-        }
-    }
-    return rv;
+    _ = c.svc_deinit();
+    _ = c.cliprdr_deinit();
 }
 
 //*****************************************************************************
@@ -912,4 +850,410 @@ fn shm_info_deinit(shm_info: *shm_info_t) void
         shm_info.shmid = -1;
     }
     shm_info.bytes = 0;
+}
+
+//*****************************************************************************
+// callback
+// int (*log_msg)(struct rdpc_t* rdpc, const char* msg);
+fn cb_rdpc_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
+{
+    if (msg) |amsg|
+    {
+        // get string length with max
+        var count: usize = 0;
+        while (amsg[count] != 0)
+        {
+            count += 1;
+            if (count >= 8192)
+            {
+                break;
+            }
+        }
+        if (count > 0)
+        {
+            if (rdpc) |ardpc|
+            {
+                const session: ?*rdp_session_t =
+                        @alignCast(@ptrCast(ardpc.user));
+                if (session) |asession|
+                {
+                    // alloc for copy
+                    const lmsg: []u8 = asession.allocator.alloc(u8,
+                            count) catch return c.LIBRDPC_ERROR_MEMORY;
+                    defer asession.allocator.free(lmsg);
+                    // make a copy
+                    var index: usize = 0;
+                    while (index < count)
+                    {
+                        lmsg[index] = amsg[index];
+                        index += 1;
+                    }
+                    asession.log_msg_slice(lmsg) catch
+                            return c.LIBRDPC_ERROR_MEMORY;
+                    return c.LIBRDPC_ERROR_NONE;
+                }
+            }
+        }
+    }
+    return c.LIBRDPC_ERROR_NONE;
+}
+
+//*****************************************************************************
+// callback
+// int (*send_to_server)(struct rdpc_t* rdpc, void* data, int bytes);
+fn cb_rdpc_send_to_server(rdpc: ?*c.rdpc_t,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        if (data) |adata|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpc.user));
+            if (session) |asession|
+            {
+                var slice: []u8 = undefined;
+                slice.ptr = @ptrCast(adata);
+                slice.len = bytes;
+                rv = c.LIBRDPC_ERROR_NONE;
+                asession.send_slice_to_server(slice) catch
+                        return c.LIBRDPC_ERROR_PARSE;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*set_surface_bits)(struct rdpc_t* rdpc,
+//                         struct bitmap_data_t* bitmap_data);
+fn cb_rdpc_set_surface_bits(rdpc: ?*c.rdpc_t,
+        bitmap_data: ?*c.bitmap_data_t) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        if (bitmap_data) |abitmap_data|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpc.user));
+            if (session) |asession|
+            {
+                asession.set_surface_bits(abitmap_data) catch
+                        return c.LIBRDPC_ERROR_PARSE;
+                rv = 0;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*set_surface_bits)(struct rdpc_t* rdpc,
+//                         uint16_t frame_action, uint32_t frame_id);
+fn cb_rdpc_frame_marker(rdpc: ?*c.rdpc_t,
+        frame_action: u16, frame_id: u32) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpc.user));
+        if (session) |asession|
+        {
+            asession.frame_marker(frame_action, frame_id)
+                    catch |err| return error_to_c_int(err);
+            rv = c.LIBRDPC_ERROR_NONE;
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*pointer_update)(struct rdpc_t* rdpc,
+//                       struct pointer_t* pointer);
+fn cb_rdpc_pointer_update(rdpc: ?*c.rdpc_t,
+        pointer: ?*c.pointer_t) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        if (pointer) |apointer|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpc.user));
+            if (session) |asession|
+            {
+                asession.pointer_update(apointer) catch
+                        return c.LIBRDPC_ERROR_PARSE;
+                rv = 0;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*pointer_cached)(struct rdpc_t* rdpc,
+//                       uint16_t cache_index);
+fn cb_rdpc_pointer_cached(rdpc: ?*c.rdpc_t, cache_index: u16) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_PARSE;
+    if (rdpc) |ardpc|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpc.user));
+        if (session) |asession|
+        {
+            asession.pointer_cached(cache_index) catch
+                    return c.LIBRDPC_ERROR_PARSE;
+            rv = 0;
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*channel)(struct rdpc_t* rdpc, uint16_t channel_id,
+//                void* data, uint32_t bytes);
+fn cb_rdpc_channel(rdpc: ?*c.rdpc_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    var rv: c_int = c.LIBRDPC_ERROR_CHANNEL;
+    if (rdpc) |ardpc|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpc.user));
+        if (session) |asession|
+        {
+            if (c.svc_process_data(asession.svc, channel_id,
+                    data, bytes) == c.LIBSVC_ERROR_NONE)
+            {
+                rv = c.LIBRDPC_ERROR_NONE;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*log_msg)(struct svc_channels_t* svc, const char* msg);
+fn cb_svc_log_msg(svc: ?*c.svc_channels_t,
+        msg: ?[*:0]const u8) callconv(.C) c_int
+{
+    if (msg) |amsg|
+    {
+        // get string length with max
+        var count: usize = 0;
+        while (amsg[count] != 0)
+        {
+            count += 1;
+            if (count >= 8192)
+            {
+                break;
+            }
+        }
+        if (count > 0)
+        {
+            if (svc) |asvc|
+            {
+                const session: ?*rdp_session_t =
+                        @alignCast(@ptrCast(asvc.user));
+                if (session) |asession|
+                {
+                    // alloc for copy
+                    const lmsg: []u8 = asession.allocator.alloc(u8,
+                            count) catch return c.LIBSVC_ERROR_MEMORY;
+                    defer asession.allocator.free(lmsg);
+                    // make a copy
+                    var index: usize = 0;
+                    while (index < count)
+                    {
+                        lmsg[index] = amsg[index];
+                        index += 1;
+                    }
+                    asession.log_msg_slice(lmsg) catch
+                            return c.LIBSVC_ERROR_MEMORY;
+                    return c.LIBSVC_ERROR_NONE;
+                }
+            }
+        }
+    }
+    return c.LIBSVC_ERROR_NONE;
+}
+
+//*****************************************************************************
+// callback
+// int (*send_data)(struct svc_channels_t* svc, uint16_t channel_id,
+//                  uint32_t total_bytes, uint32_t flags,
+//                  void* data, uint32_t bytes);
+fn cb_svc_send_data(svc: ?*c.svc_channels_t, channel_id: u16,
+        total_bytes: u32, flags: u32, data: ?*anyopaque,
+        bytes: u32) callconv(.C) c_int
+{
+    if (svc) |asvc|
+    {
+        const session: ?*rdp_session_t = @alignCast(@ptrCast(asvc.user));
+        if (session) |asession|
+        {
+            asession.logln(log.LogLevel.info, @src(),
+                    "total_bytes {} bytes {} flags {}",
+                    .{total_bytes, bytes, flags})
+                    catch return c.LIBSVC_ERROR_SEND_DATA;
+            const rv = c.rdpc_channel_send_data(asession.rdpc, channel_id,
+                    total_bytes, flags, data, bytes);
+            if (rv == c.LIBRDPC_ERROR_NONE)
+            {
+                return c.LIBSVC_ERROR_NONE;
+            }
+        }
+    }
+    return c.LIBSVC_ERROR_SEND_DATA;
+}
+
+//*****************************************************************************
+// callback
+// int (*log_msg)(struct cliprdr_t* cliprdr, const char* msg);
+fn cb_cliprdr_log_msg(cliprdr: ?*c.cliprdr_t,
+        msg: ?[*:0]const u8) callconv(.C) c_int
+{
+    if (msg) |amsg|
+    {
+        // get string length with max
+        var count: usize = 0;
+        while (amsg[count] != 0)
+        {
+            count += 1;
+            if (count >= 8192)
+            {
+                break;
+            }
+        }
+        if (count > 0)
+        {
+            if (cliprdr) |acliprdr|
+            {
+                const session: ?*rdp_session_t =
+                        @alignCast(@ptrCast(acliprdr.user));
+                if (session) |asession|
+                {
+                    // alloc for copy
+                    const lmsg: []u8 = asession.allocator.alloc(u8,
+                            count) catch return c.LIBCLIPRDR_ERROR_MEMORY;
+                    defer asession.allocator.free(lmsg);
+                    // make a copy
+                    var index: usize = 0;
+                    while (index < count)
+                    {
+                        lmsg[index] = amsg[index];
+                        index += 1;
+                    }
+                    asession.log_msg_slice(lmsg) catch
+                            return c.LIBCLIPRDR_ERROR_MEMORY;
+                    return c.LIBCLIPRDR_ERROR_NONE;
+                }
+            }
+        }
+    }
+    return c.LIBCLIPRDR_ERROR_NONE;
+}
+
+//*****************************************************************************
+// callback
+// int (*send_data)(struct cliprdr_t* cliprdr, uint16_t channel_id,
+//                  void* data, uint32_t bytes);
+fn cb_cliprdr_send_data(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    if (cliprdr) |acliprdr|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(acliprdr.user));
+        if (session) |asession|
+        {
+            asession.logln(log.LogLevel.info, @src(), "bytes {}", .{bytes})
+                    catch return c.LIBCLIPRDR_ERROR_SEND_DATA;
+            const rv = c.svc_send_data(asession.svc, channel_id, data, bytes);
+            if (rv == c.LIBSVC_ERROR_NONE)
+            {
+                return c.LIBCLIPRDR_ERROR_NONE;
+            }
+        }
+    }
+    return c.LIBCLIPRDR_ERROR_SEND_DATA;
+}
+
+//*****************************************************************************
+// callback
+// int (*ready)(struct cliprdr_t* cliprdr, uint32_t version,
+//              uint32_t general_flags);
+fn cb_cliprdr_ready(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        version: u32, general_flags: u32) callconv(.C) c_int
+{
+    if (cliprdr) |acliprdr|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(acliprdr.user));
+        if (session) |asession|
+        {
+            return asession.cliprdr_ready(channel_id,
+                    version, general_flags) catch c.LIBCLIPRDR_ERROR_READY;
+        }
+    }
+    return c.LIBCLIPRDR_ERROR_READY;
+}
+
+//*****************************************************************************
+// callback
+// int (*format_list)(struct cliprdr_t* cliprdr, uint16_t channel_id,
+//                    uint16_t msg_flags, uint32_t num_formats,
+//                    struct cliprdr_format_t* formats);
+fn cb_cliprdr_format_list(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        num_formats: u32, formats: ?[*]c.cliprdr_format_t) callconv(.C) c_int
+{
+    if (cliprdr) |acliprdr|
+    {
+        if (formats) |aformats|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(acliprdr.user));
+            if (session) |asession|
+            {
+                return asession.cliprdr_format_list(channel_id,
+                        num_formats, aformats) catch
+                        c.LIBCLIPRDR_ERROR_FORMAT_LIST;
+            }
+        }
+    }
+    return c.LIBCLIPRDR_ERROR_FORMAT_LIST;
+}
+
+//*****************************************************************************
+// callback
+// int (*process_data)(struct svc_t* svc, uint16_t channel_id,
+//                     void* data, uint32_t bytes);
+fn cb_svc_cliprdr_process_data(svc: ?*c.svc_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    if (svc) |asvc|
+    {
+        const session: ?*rdp_session_t = @alignCast(@ptrCast(asvc.user));
+        if (session) |asession|
+        {
+            const rv = c.cliprdr_process_data(asession.cliprdr, channel_id,
+                    data, bytes);
+            if (rv == c.LIBCLIPRDR_ERROR_NONE)
+            {
+                return c.LIBSVC_ERROR_NONE;
+            }
+        }
+    }
+    return c.LIBSVC_ERROR_PROCESS_DATA;
 }

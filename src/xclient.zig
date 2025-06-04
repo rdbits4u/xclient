@@ -15,6 +15,8 @@ const c = @cImport(
     @cInclude("X11/extensions/XShm.h");
     @cInclude("X11/Xcursor/Xcursor.h");
     @cInclude("librdpc.h");
+    @cInclude("libsvc.h");
+    @cInclude("libcliprdr.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
 });
@@ -124,10 +126,10 @@ fn process_args(settings: *c.rdpc_settings_t,
     settings.dpix = 96;
     settings.dpiy = 96;
     settings.keyboard_layout = 0x0409;
-    settings.cliprdr = 1;
-    settings.rdpsnd = 1;
-    settings.rail = 1;
-    settings.rdpdr = 1;
+    //settings.cliprdr = 1;
+    //settings.rdpsnd = 1;
+    //settings.rail = 1;
+    //settings.rdpdr = 1;
     settings.rfx = 1;
     settings.jpg = 0;
     settings.use_frame_ack = 1;

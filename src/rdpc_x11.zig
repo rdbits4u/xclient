@@ -15,6 +15,8 @@ const c = @cImport(
     @cInclude("X11/extensions/XShm.h");
     @cInclude("X11/Xcursor/Xcursor.h");
     @cInclude("librdpc.h");
+    @cInclude("libsvc.h");
+    @cInclude("libcliprdr.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
 });
@@ -41,9 +43,9 @@ const rdp_key_code_t = struct
 
 pub const rdp_x11_t = struct
 {
-    session: *rdpc_session.rdp_session_t = undefined,
-    allocator: *const std.mem.Allocator = undefined,
-    display: *c.Display = undefined,
+    session: *rdpc_session.rdp_session_t,
+    allocator: *const std.mem.Allocator,
+    display: *c.Display,
     fd: c_int = 0,
     screen_number: c_int = 0,
     white: c_ulong = 0,
@@ -669,6 +671,8 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     pub fn pointer_update(self: *rdp_x11_t, pointer: *c.pointer_t) !void
     {
+        // _ = self;
+        // _ = pointer;
         try self.session.logln_devel(log.LogLevel.debug, @src(), "xor_bpp {}",
                 .{pointer.xor_bpp});
         if (self.pointer_cache.len < 1)
@@ -702,12 +706,12 @@ pub const rdp_x11_t = struct
             xor_data.len = pointer.length_xor_mask;
             if (pointer.and_mask_data) |aand_data|
             {
-                const bpp = pointer.xor_bpp;
+                const bpp = if (pointer.xor_bpp == 0) 24 else pointer.xor_bpp;
                 const w = pointer.width;
                 const h = pointer.height;
                 var and_data: []const u8 = undefined;
                 and_data.ptr = @ptrCast(aand_data);
-                xor_data.len = pointer.length_and_mask;
+                and_data.len = pointer.length_and_mask;
                 for (0..h) |y|
                 {
                     const yup = (h - 1) - y;
@@ -756,6 +760,16 @@ pub const rdp_x11_t = struct
                 self.pointer_cache[cache_index]);
     }
 
+    //*************************************************************************
+    pub fn cliprdr_format_list(self: *rdp_x11_t, channel_id: u16,
+            num_formats: u32, formats: [*]c.cliprdr_format_t) !void
+    {
+        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
+        _ = channel_id;
+        _ = num_formats;
+        _ = formats;
+    }
+
 };
 
 //*****************************************************************************
@@ -765,16 +779,14 @@ pub fn create(session: *rdpc_session.rdp_session_t,
 {
     const self = try allocator.create(rdp_x11_t);
     errdefer allocator.destroy(self);
-    self.* = .{};
-    self.session = session;
-    self.allocator = allocator;
+    const dis = c.XOpenDisplay(null);
+    const display = if (dis) |adis| adis else return MyError.BadOpenDisplay;
+    errdefer _ = c.XCloseDisplay(display);
+    self.* = .{.session = session, .allocator = allocator, .display = display};
     try self.session.logln(log.LogLevel.debug, @src(),
-            "rdp_x11_t width {} height {}",
-            .{width, height});
+            "rdp_x11_t width {} height {}", .{width, height});
     self.width = width;
     self.height = height;
-    const dis = c.XOpenDisplay(null);
-    self.display = if (dis) |adis| adis else return MyError.BadOpenDisplay;
     self.fd = c.XConnectionNumber(self.display);
     self.screen_number = c.DefaultScreen(self.display);
     self.white = c.WhitePixel(self.display, self.screen_number);
