@@ -26,6 +26,7 @@ const MyError = error
     GetFds,
     BadPointerCacheIndex,
     BadOpenDisplay,
+    BadClipRdr,
 };
 
 //*****************************************************************************
@@ -762,12 +763,54 @@ pub const rdp_x11_t = struct
 
     //*************************************************************************
     pub fn cliprdr_format_list(self: *rdp_x11_t, channel_id: u16,
-            num_formats: u32, formats: [*]c.cliprdr_format_t) !void
+            msg_flags: u16, num_formats: u32,
+            formats: [*]c.cliprdr_format_t) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "channel_id {} msg_flags {}", .{channel_id, msg_flags});
+        for (0..num_formats) |index|
+        {
+            const format = &formats[index];
+            try self.session.logln(log.LogLevel.debug, @src(),
+                    "index {} format_id {} format_name_bytes {}",
+                    .{index, format.format_id, format.format_name_bytes});
+        }
+
+        const rv = c.cliprdr_send_format_list_response(self.session.cliprdr,
+                channel_id, c.CB_RESPONSE_OK);
+        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, MyError.BadClipRdr);
+
+        _ = c.cliprdr_send_data_request(self.session.cliprdr, channel_id, 1);
+    }
+
+    //*************************************************************************
+    pub fn cliprdr_format_list_response(self: *rdp_x11_t, channel_id: u16,
+            msg_flags: u16) !void
+    {
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "msg_flags {}", .{msg_flags});
         _ = channel_id;
-        _ = num_formats;
-        _ = formats;
+    }
+
+    //*************************************************************************
+    pub fn cliprdr_data_request(self: *rdp_x11_t, channel_id: u16,
+            requested_format_id: u32) !void
+    {
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "requested_format_id {}", .{requested_format_id});
+        _ = channel_id;
+    }
+
+    //*************************************************************************
+    pub fn cliprdr_data_response(self: *rdp_x11_t, channel_id: u16,
+            msg_flags: u16, requested_format_data: ?*anyopaque,
+            requested_format_data_bytes: u32) !void
+    {
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "msg_flags {}", .{msg_flags});
+        _ = channel_id;
+        _ = requested_format_data;
+        _ = requested_format_data_bytes;
     }
 
 };

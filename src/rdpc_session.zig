@@ -701,17 +701,64 @@ pub const rdp_session_t = struct
 
     //*************************************************************************
     fn cliprdr_format_list(self: *rdp_session_t, channel_id: u16,
-            num_formats: u32, formats: [*]c.cliprdr_format_t) !c_int
+            msg_flags: u16, num_formats: u32,
+            formats: [*]c.cliprdr_format_t) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
             "channel_id 0x{X} num_formats {}",
             .{channel_id, num_formats});
         if (self.rdp_x11) |ardp_x11|
         {
-            try ardp_x11.cliprdr_format_list(channel_id, num_formats, formats);
+            try ardp_x11.cliprdr_format_list(channel_id, msg_flags,
+                    num_formats, formats);
             return c.LIBCLIPRDR_ERROR_NONE;
         }
         return c.LIBCLIPRDR_ERROR_FORMAT_LIST;
+    }
+
+    //*************************************************************************
+    fn cliprdr_format_list_response(self: *rdp_session_t, channel_id: u16,
+            msg_flags: u16) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "msg_flags 0x{X}", .{msg_flags});
+        if (self.rdp_x11) |ardp_x11|
+        {
+            try ardp_x11.cliprdr_format_list_response(channel_id, msg_flags);
+            return c.LIBCLIPRDR_ERROR_NONE;
+        }
+        return c.LIBCLIPRDR_ERROR_FORMAT_LIST;
+    }
+
+    //*************************************************************************
+    fn cliprdr_data_request(self: *rdp_session_t, channel_id: u16,
+            requested_format_id: u32) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "requested_format_id 0x{X}", .{requested_format_id});
+        if (self.rdp_x11) |ardp_x11|
+        {
+            try ardp_x11.cliprdr_data_request(channel_id, requested_format_id);
+            return c.LIBCLIPRDR_ERROR_NONE;
+        }
+        return c.LIBCLIPRDR_ERROR_DATA_REQUEST;
+    }
+
+    //*************************************************************************
+    fn cliprdr_data_response(self: *rdp_session_t, channel_id: u16,
+            msg_flags: u16, requested_format_data: ?*anyopaque,
+            requested_format_data_bytes: u32) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "msg_flags 0x{X} requested_format_data_bytes {}",
+            .{msg_flags, requested_format_data_bytes});
+        if (self.rdp_x11) |ardp_x11|
+        {
+            try ardp_x11.cliprdr_data_response(channel_id, msg_flags,
+                    requested_format_data, requested_format_data_bytes);
+            return c.LIBCLIPRDR_ERROR_NONE;
+        }
+        return c.LIBCLIPRDR_ERROR_DATA_RESPONSE;
     }
 
 };
@@ -793,6 +840,9 @@ pub fn create(allocator: *const std.mem.Allocator,
     cliprdr.send_data = cb_cliprdr_send_data;
     cliprdr.ready = cb_cliprdr_ready;
     cliprdr.format_list = cb_cliprdr_format_list;
+    cliprdr.format_list_response = cb_cliprdr_format_list_response;
+    cliprdr.data_request = cb_cliprdr_data_request;
+    cliprdr.data_response = cb_cliprdr_data_response;
     const gcc_net = &rdpc.cgcc.net;
     const index = gcc_net.channelCount;
     const chan = &gcc_net.channelDefArray[index];
@@ -1216,7 +1266,8 @@ fn cb_cliprdr_ready(cliprdr: ?*c.cliprdr_t, channel_id: u16,
 //                    uint16_t msg_flags, uint32_t num_formats,
 //                    struct cliprdr_format_t* formats);
 fn cb_cliprdr_format_list(cliprdr: ?*c.cliprdr_t, channel_id: u16,
-        num_formats: u32, formats: ?[*]c.cliprdr_format_t) callconv(.C) c_int
+        msg_flags: u16, num_formats: u32,
+        formats: ?[*]c.cliprdr_format_t) callconv(.C) c_int
 {
     if (cliprdr) |acliprdr|
     {
@@ -1226,13 +1277,81 @@ fn cb_cliprdr_format_list(cliprdr: ?*c.cliprdr_t, channel_id: u16,
                     @alignCast(@ptrCast(acliprdr.user));
             if (session) |asession|
             {
-                return asession.cliprdr_format_list(channel_id,
+                return asession.cliprdr_format_list(channel_id, msg_flags,
                         num_formats, aformats) catch
                         c.LIBCLIPRDR_ERROR_FORMAT_LIST;
             }
         }
     }
     return c.LIBCLIPRDR_ERROR_FORMAT_LIST;
+}
+
+//*****************************************************************************
+// callback
+// int (*format_list_response)(struct cliprdr_t* cliprdr,
+//                             uint16_t channel_id, uint16_t msg_flags);
+fn cb_cliprdr_format_list_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        msg_flags: u16) callconv(.C) c_int
+{
+    if (cliprdr) |acliprdr|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(acliprdr.user));
+        if (session) |asession|
+        {
+            return asession.cliprdr_format_list_response(channel_id,
+                    msg_flags) catch c.LIBCLIPRDR_ERROR_FORMAT_LIST_RESPONSE;
+        }
+    }
+    return c.LIBCLIPRDR_ERROR_FORMAT_LIST_RESPONSE;
+}
+
+//*****************************************************************************
+// callback
+// int (*data_request)(struct cliprdr_t* cliprdr, uint16_t channel_id,
+//                     uint32_t requested_format_id);
+fn cb_cliprdr_data_request(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        requested_format_id: u32) callconv(.C) c_int
+{
+    if (cliprdr) |acliprdr|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(acliprdr.user));
+        if (session) |asession|
+        {
+            return asession.cliprdr_data_request(channel_id,
+                    requested_format_id) catch
+                    c.LIBCLIPRDR_ERROR_DATA_REQUEST;
+        }
+    }
+    return c.LIBCLIPRDR_ERROR_DATA_REQUEST;
+}
+
+//*****************************************************************************
+// callback
+// int (*data_response)(struct cliprdr_t* cliprdr, uint16_t channel_id,
+//                      uint16_t msg_flags, void* requested_format_data,
+//                      uint32_t requested_format_data_bytes);
+fn cb_cliprdr_data_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        msg_flags: u16, requested_format_data: ?*anyopaque,
+        requested_format_data_bytes: u32) callconv(.C) c_int
+{
+    if (cliprdr) |acliprdr|
+    {
+        if (requested_format_data) |arequested_format_data|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(acliprdr.user));
+            if (session) |asession|
+            {
+                return asession.cliprdr_data_response(channel_id, msg_flags,
+                        arequested_format_data,
+                        requested_format_data_bytes) catch
+                        c.LIBCLIPRDR_ERROR_DATA_RESPONSE;
+            }
+        }
+    }
+    return c.LIBCLIPRDR_ERROR_DATA_RESPONSE;
 }
 
 //*****************************************************************************
