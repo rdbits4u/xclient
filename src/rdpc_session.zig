@@ -16,6 +16,7 @@ const c = @cImport(
     @cInclude("librdpc.h");
     @cInclude("libsvc.h");
     @cInclude("libcliprdr.h");
+    @cInclude("librdpsnd.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
 });
@@ -35,6 +36,8 @@ const MyError = error
     SvcCreate,
     CliprdrInit,
     CliprdrCreate,
+    RdpsndInit,
+    RdpsndCreate,
 };
 
 //*****************************************************************************
@@ -91,6 +94,7 @@ pub const rdp_session_t = struct
     rdpc: *c.rdpc_t,
     svc: *c.svc_channels_t,
     cliprdr: *c.cliprdr_t,
+    rdpsnd: *c.rdpsnd_t,
     connected: bool = false,
     sck: i32 = -1,
     recv_start: usize = 0,
@@ -761,6 +765,17 @@ pub const rdp_session_t = struct
         return c.LIBCLIPRDR_ERROR_DATA_RESPONSE;
     }
 
+    //*************************************************************************
+    fn rdpsnd_formats(self: *rdp_session_t, channel_id: u16, version: u16,
+            block_no: u8, num_formats: u16, formats: [*]c.format_t) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "channel_id 0x{X} version {} block_no {} num_formats {}",
+            .{channel_id, version, block_no, num_formats});
+        _ = formats;
+        return c.LIBRDPSND_ERROR_NONE;
+    }
+
 };
 
 //*****************************************************************************
@@ -809,6 +824,21 @@ fn create_cliprdr() !*c.cliprdr_t
 }
 
 //*****************************************************************************
+fn create_rdpsnd() !*c.rdpsnd_t
+{
+    var rdpsnd: ?*c.rdpsnd_t = null;
+    const rv = c.rdpsnd_create(&rdpsnd);
+    if (rv == c.LIBRDPSND_ERROR_NONE)
+    {
+        if (rdpsnd) |ardpsnd|
+        {
+            return ardpsnd;
+        }
+    }
+    return MyError.RdpsndCreate;
+}
+
+//*****************************************************************************
 pub fn create(allocator: *const std.mem.Allocator,
         settings: *c.rdpc_settings_t,
         rdp_connect: *rdp_connect_t) !*rdp_session_t
@@ -826,12 +856,17 @@ pub fn create(allocator: *const std.mem.Allocator,
     rdpc.pointer_update = cb_rdpc_pointer_update;
     rdpc.pointer_cached = cb_rdpc_pointer_cached;
     rdpc.channel = cb_rdpc_channel;
+
     // setup svc
     var svc = try create_svc();
     errdefer _ = c.svc_delete(svc);
     svc.user = self;
     svc.log_msg = cb_svc_log_msg;
     svc.send_data = cb_svc_send_data;
+
+    // setup channels
+    const gcc_net = &rdpc.cgcc.net;
+
     // setup cliprdr
     var cliprdr = try create_cliprdr();
     errdefer _ = c.cliprdr_delete(cliprdr);
@@ -843,17 +878,32 @@ pub fn create(allocator: *const std.mem.Allocator,
     cliprdr.format_list_response = cb_cliprdr_format_list_response;
     cliprdr.data_request = cb_cliprdr_data_request;
     cliprdr.data_response = cb_cliprdr_data_response;
-    const gcc_net = &rdpc.cgcc.net;
-    const index = gcc_net.channelCount;
-    const chan = &gcc_net.channelDefArray[index];
+    var chan_index = gcc_net.channelCount;
+    var chan = &gcc_net.channelDefArray[chan_index];
     std.mem.copyForwards(u8, &chan.name, "CLIPRDR");
     chan.options = 0;
-    svc.channels[index].user = self;
-    svc.channels[index].process_data = cb_svc_cliprdr_process_data;
+    svc.channels[chan_index].user = self;
+    svc.channels[chan_index].process_data = cb_svc_cliprdr_process_data;
     gcc_net.channelCount += 1;
+
+    // setup rdpsnd
+    var rdpsnd = try create_rdpsnd();
+    errdefer _ = c.rdpsnd_delete(rdpsnd);
+    rdpsnd.user = self;
+    rdpsnd.log_msg = cb_rdpsnd_log_msg;
+    rdpsnd.send_data = cb_rdpsnd_send_data;
+    rdpsnd.formats = cb_rdpsnd_formats;
+    chan_index = gcc_net.channelCount;
+    chan = &gcc_net.channelDefArray[chan_index];
+    std.mem.copyForwards(u8, &chan.name, "RDPSND");
+    chan.options = 0;
+    svc.channels[chan_index].user = self;
+    svc.channels[chan_index].process_data = cb_svc_rdpsnd_process_data;
+    gcc_net.channelCount += 1;
+
     // init self
     self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
-            .rdpc = rdpc, .svc = svc, .cliprdr = cliprdr};
+            .rdpc = rdpc, .svc = svc, .cliprdr = cliprdr, .rdpsnd = rdpsnd};
     return self;
 }
 
@@ -863,6 +913,7 @@ pub fn init() !void
     try err_if(c.rdpc_init() != c.LIBRDPC_ERROR_NONE, MyError.RdpcInit);
     try err_if(c.svc_init() != c.LIBSVC_ERROR_NONE, MyError.SvcInit);
     try err_if(c.cliprdr_init() != c.LIBCLIPRDR_ERROR_NONE, MyError.CliprdrInit);
+    try err_if(c.rdpsnd_init() != c.LIBRDPSND_ERROR_NONE, MyError.RdpsndInit);
 }
 
 //*****************************************************************************
@@ -871,6 +922,7 @@ pub fn deinit() void
     _ = c.rdpc_deinit();
     _ = c.svc_deinit();
     _ = c.cliprdr_deinit();
+    _ = c.rdpsnd_deinit();
 }
 
 //*****************************************************************************
@@ -1369,6 +1421,127 @@ fn cb_svc_cliprdr_process_data(svc: ?*c.svc_t, channel_id: u16,
             const rv = c.cliprdr_process_data(asession.cliprdr, channel_id,
                     data, bytes);
             if (rv == c.LIBCLIPRDR_ERROR_NONE)
+            {
+                return c.LIBSVC_ERROR_NONE;
+            }
+        }
+    }
+    return c.LIBSVC_ERROR_PROCESS_DATA;
+}
+
+//*****************************************************************************
+// callback
+// int (*log_msg)(struct rdpsnd_t* rdpsnd, const char* msg);
+fn cb_rdpsnd_log_msg(rdpsnd: ?*c.rdpsnd_t,
+        msg: ?[*:0]const u8) callconv(.C) c_int
+{
+    if (msg) |amsg|
+    {
+        // get string length with max
+        var count: usize = 0;
+        while (amsg[count] != 0)
+        {
+            count += 1;
+            if (count >= 8192)
+            {
+                break;
+            }
+        }
+        if (count > 0)
+        {
+            if (rdpsnd) |ardpsnd|
+            {
+                const session: ?*rdp_session_t =
+                        @alignCast(@ptrCast(ardpsnd.user));
+                if (session) |asession|
+                {
+                    // alloc for copy
+                    const lmsg: []u8 = asession.allocator.alloc(u8,
+                            count) catch return c.LIBRDPSND_ERROR_MEMORY;
+                    defer asession.allocator.free(lmsg);
+                    // make a copy
+                    var index: usize = 0;
+                    while (index < count)
+                    {
+                        lmsg[index] = amsg[index];
+                        index += 1;
+                    }
+                    asession.log_msg_slice(lmsg) catch
+                            return c.LIBRDPSND_ERROR_MEMORY;
+                    return c.LIBRDPSND_ERROR_NONE;
+                }
+            }
+        }
+    }
+    return c.LIBRDPSND_ERROR_NONE;
+}
+
+//*****************************************************************************
+// callback
+// int (*send_data)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
+//                  void* data, uint32_t bytes);
+fn cb_rdpsnd_send_data(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    if (rdpsnd) |ardpsnd|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpsnd.user));
+        if (session) |asession|
+        {
+            asession.logln(log.LogLevel.info, @src(), "bytes {}", .{bytes})
+                    catch return c.LIBRDPSND_ERROR_SEND_DATA;
+            const rv = c.svc_send_data(asession.svc, channel_id, data, bytes);
+            if (rv == c.LIBSVC_ERROR_NONE)
+            {
+                return c.LIBRDPSND_ERROR_NONE;
+            }
+        }
+    }
+    return c.LIBRDPSND_ERROR_SEND_DATA;
+}
+
+//*****************************************************************************
+// callback
+// int (*formats)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
+//                uint16_t version, uint8_t block_no,
+//                uint16_t num_formats, struct format_t* formats);
+fn cb_rdpsnd_formats(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+        version: u16, block_no: u8, num_formats: u16,
+        formats: ?[*]c.format_t) callconv(.C) c_int
+{
+    if (rdpsnd) |ardpsnd|
+    {
+         if (formats) |aformats|
+         {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpsnd.user));
+            if (session) |asession|
+            {
+                return asession.rdpsnd_formats(channel_id, version, block_no,
+                        num_formats, aformats) catch
+                        c.LIBRDPSND_ERROR_FORMATS;
+            }
+         }
+    }
+    return c.LIBRDPSND_ERROR_FORMATS;
+}
+
+//*****************************************************************************
+// callback
+// int (*process_data)(struct svc_t* svc, uint16_t channel_id,
+//                     void* data, uint32_t bytes);
+fn cb_svc_rdpsnd_process_data(svc: ?*c.svc_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    if (svc) |asvc|
+    {
+        const session: ?*rdp_session_t = @alignCast(@ptrCast(asvc.user));
+        if (session) |asession|
+        {
+            const rv = c.rdpsnd_process_data(asession.rdpsnd, channel_id,
+                    data, bytes);
+            if (rv == c.LIBRDPSND_ERROR_NONE)
             {
                 return c.LIBSVC_ERROR_NONE;
             }

@@ -17,6 +17,7 @@ const c = @cImport(
     @cInclude("librdpc.h");
     @cInclude("libsvc.h");
     @cInclude("libcliprdr.h");
+    @cInclude("librdpsnd.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
 });
@@ -767,7 +768,7 @@ pub const rdp_x11_t = struct
             formats: [*]c.cliprdr_format_t) !void
     {
         try self.session.logln(log.LogLevel.debug, @src(),
-                "channel_id {} msg_flags {}", .{channel_id, msg_flags});
+                "channel_id 0x{X} msg_flags {}", .{channel_id, msg_flags});
         for (0..num_formats) |index|
         {
             const format = &formats[index];
@@ -776,11 +777,12 @@ pub const rdp_x11_t = struct
                     .{index, format.format_id, format.format_name_bytes});
         }
 
-        const rv = c.cliprdr_send_format_list_response(self.session.cliprdr,
+        var rv = c.cliprdr_send_format_list_response(self.session.cliprdr,
                 channel_id, c.CB_RESPONSE_OK);
         try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, MyError.BadClipRdr);
 
-        _ = c.cliprdr_send_data_request(self.session.cliprdr, channel_id, 1);
+        rv = c.cliprdr_send_data_request(self.session.cliprdr, channel_id, 1);
+        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, MyError.BadClipRdr);
     }
 
     //*************************************************************************
