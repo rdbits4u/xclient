@@ -136,7 +136,6 @@ fn process_args(settings: *c.rdpc_settings_t,
     {
         strings.copyZ(&settings.username, auser_env);
     }
-    strings.copyZ(&settings.password, "qpalzm1");
     var hostname_buf: [std.posix.HOST_NAME_MAX]u8 =
             std.mem.zeroes([std.posix.HOST_NAME_MAX]u8);
     const hostname = try std.posix.gethostname(&hostname_buf);
