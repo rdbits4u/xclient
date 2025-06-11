@@ -766,14 +766,54 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    fn rdpsnd_formats(self: *rdp_session_t, channel_id: u16, version: u16,
-            block_no: u8, num_formats: u16, formats: [*]c.format_t) !c_int
+    fn rdpsnd_process_wave_slice(self: *rdp_session_t, channel_id: u16,
+            time_stamp: u16, format_no: u16, block_no: u8, slice: []u8) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
-            "channel_id 0x{X} version {} block_no {} num_formats {}",
-            .{channel_id, version, block_no, num_formats});
-        _ = formats;
-        return c.LIBRDPSND_ERROR_NONE;
+                "channel_id 0x{X} time_stamp {} format_no {} " ++
+                "block_no {} slice.len {}",
+                .{channel_id, time_stamp, format_no, block_no, slice.len});
+        return c.rdpsnd_send_waveconfirm(self.rdpsnd, channel_id,
+                time_stamp, block_no);
+    }
+
+    //*************************************************************************
+    fn rdpsnd_process_training(self: *rdp_session_t, channel_id: u16,
+            time_stamp: u16, pack_size: u16,
+            data: ?*anyopaque, bytes: u32) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(), "", .{});
+        _ = data;
+        _ = bytes;
+        // doc says do not send data back in training confirm
+        return c.rdpsnd_send_training(self.rdpsnd, channel_id,
+                time_stamp, pack_size, null, 0);
+    }
+
+    //*************************************************************************
+    fn rdpsnd_process_formats(self: *rdp_session_t, channel_id: u16,
+            flags: u32, volume: u32, pitch: u32, dgram_port: u16,
+            version: u16, block_no: u8,
+            num_formats: u16, formats: [*]c.format_t) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "channel_id 0x{X} flags {} volume {} pitch {} dgram_port {} " ++
+            "version {} block_no {} num_formats {}",
+            .{channel_id, flags, volume, pitch, dgram_port, version,
+            block_no, num_formats});
+        var sformats = std.ArrayList(c.format_t).init(self.allocator.*);
+        defer sformats.deinit();
+        for (0..num_formats) |index|
+        {
+            const format = &formats[index];
+            if (format.wFormatTag == 1)
+            {
+                try sformats.append(format.*);
+            }
+        }
+        return c.rdpsnd_send_formats(self.rdpsnd, channel_id, flags,
+                volume, pitch, dgram_port, version, block_no,
+                @truncate(sformats.items.len), sformats.items.ptr);
     }
 
 };
@@ -892,7 +932,9 @@ pub fn create(allocator: *const std.mem.Allocator,
     rdpsnd.user = self;
     rdpsnd.log_msg = cb_rdpsnd_log_msg;
     rdpsnd.send_data = cb_rdpsnd_send_data;
-    rdpsnd.formats = cb_rdpsnd_formats;
+    rdpsnd.process_wave = cb_rdpsnd_process_wave;
+    rdpsnd.process_training = cb_rdpsnd_process_training;
+    rdpsnd.process_formats = cb_rdpsnd_process_formats;
     chan_index = gcc_net.channelCount;
     chan = &gcc_net.channelDefArray[chan_index];
     std.mem.copyForwards(u8, &chan.name, "RDPSND");
@@ -1205,7 +1247,7 @@ fn cb_svc_send_data(svc: ?*c.svc_channels_t, channel_id: u16,
         const session: ?*rdp_session_t = @alignCast(@ptrCast(asvc.user));
         if (session) |asession|
         {
-            asession.logln(log.LogLevel.info, @src(),
+            asession.logln_devel(log.LogLevel.info, @src(),
                     "total_bytes {} bytes {} flags {}",
                     .{total_bytes, bytes, flags})
                     catch return c.LIBSVC_ERROR_SEND_DATA;
@@ -1489,7 +1531,8 @@ fn cb_rdpsnd_send_data(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
                 @alignCast(@ptrCast(ardpsnd.user));
         if (session) |asession|
         {
-            asession.logln(log.LogLevel.info, @src(), "bytes {}", .{bytes})
+            asession.logln_devel(log.LogLevel.info, @src(),
+                    "bytes {}", .{bytes})
                     catch return c.LIBRDPSND_ERROR_SEND_DATA;
             const rv = c.svc_send_data(asession.svc, channel_id, data, bytes);
             if (rv == c.LIBSVC_ERROR_NONE)
@@ -1503,28 +1546,84 @@ fn cb_rdpsnd_send_data(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
 
 //*****************************************************************************
 // callback
-// int (*formats)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
-//                uint16_t version, uint8_t block_no,
-//                uint16_t num_formats, struct format_t* formats);
-fn cb_rdpsnd_formats(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+// int (*process_wave)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
+//                     uint16_t time_stamp, uint16_t format_no,
+//                     uint8_t block_no, void* data, uint32_t bytes);
+fn cb_rdpsnd_process_wave(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+        time_stamp: u16, format_no: u16, block_no: u8,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    if (rdpsnd) |ardpsnd|
+    {
+        if (data) |adata|
+        {
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpsnd.user));
+            if (session) |asession|
+            {
+                var slice: []u8 = undefined;
+                slice.ptr = @ptrCast(adata);
+                slice.len = bytes;
+                return asession.rdpsnd_process_wave_slice(channel_id,
+                        time_stamp, format_no, block_no, slice) catch
+                        c.LIBRDPSND_ERROR_PROCESS_WAVE;
+            }
+        }
+    }
+    return c.LIBRDPSND_ERROR_PROCESS_WAVE;
+}
+
+//*****************************************************************************
+// callback
+// int (*process_training)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
+//                         uint16_t time_stamp, uint16_t pack_size,
+//                         void* data, uint32_t bytes);
+fn cb_rdpsnd_process_training(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+        time_stamp: u16, pack_size: u16,
+        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+{
+    if (rdpsnd) |ardpsnd|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpsnd.user));
+        if (session) |asession|
+        {
+            return asession.rdpsnd_process_training(channel_id, time_stamp,
+                    pack_size, data, bytes) catch
+                    c.LIBRDPSND_ERROR_PROCESS_TRAINING;
+        }
+    }
+    return c.LIBRDPSND_ERROR_PROCESS_TRAINING;
+}
+
+//*****************************************************************************
+// callback
+// int (*process_formats)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
+//                        uint32_t flags, uint32_t volume,
+//                        uint32_t pitch, uint16_t dgram_port,
+//                        uint16_t version, uint8_t block_no,
+//                        uint16_t num_formats, struct format_t* formats);
+fn cb_rdpsnd_process_formats(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+        flags: u32, volume: u32, pitch: u32, dgram_port: u16,
         version: u16, block_no: u8, num_formats: u16,
         formats: ?[*]c.format_t) callconv(.C) c_int
 {
     if (rdpsnd) |ardpsnd|
     {
-         if (formats) |aformats|
-         {
+        if (formats) |aformats|
+        {
             const session: ?*rdp_session_t =
                     @alignCast(@ptrCast(ardpsnd.user));
             if (session) |asession|
             {
-                return asession.rdpsnd_formats(channel_id, version, block_no,
+                return asession.rdpsnd_process_formats(channel_id, flags,
+                        volume, pitch, dgram_port, version, block_no,
                         num_formats, aformats) catch
-                        c.LIBRDPSND_ERROR_FORMATS;
+                        c.LIBRDPSND_ERROR_PROCESS_FORMATS;
             }
-         }
+        }
     }
-    return c.LIBRDPSND_ERROR_FORMATS;
+    return c.LIBRDPSND_ERROR_PROCESS_FORMATS;
 }
 
 //*****************************************************************************
@@ -1541,6 +1640,8 @@ fn cb_svc_rdpsnd_process_data(svc: ?*c.svc_t, channel_id: u16,
         {
             const rv = c.rdpsnd_process_data(asession.rdpsnd, channel_id,
                     data, bytes);
+            asession.logln_devel(log.LogLevel.info, @src(), "rv {}", .{rv})
+                    catch return c.LIBSVC_ERROR_PROCESS_DATA;
             if (rv == c.LIBRDPSND_ERROR_NONE)
             {
                 return c.LIBSVC_ERROR_NONE;
