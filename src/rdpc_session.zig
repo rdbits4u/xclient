@@ -813,7 +813,12 @@ pub const rdp_session_t = struct
 
         if (self.pulse == null)
         {
-            self.pulse = try rdpc_pulse.create(self, self.allocator);
+            self.pulse = try rdpc_pulse.create(self, self.allocator,
+                    "xclient");
+            if (self.pulse) |apulse|
+            {
+                //try apulse.start("hi", 0, 0);
+            }
         }
 
         for (0..num_formats) |index|

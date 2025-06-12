@@ -57,6 +57,32 @@ pub const rdp_pulse_t = struct
         self.allocator.destroy(self);
     }
 
+    //*************************************************************************
+    pub fn start(self: *rdp_pulse_t, name: [:0]const u8, ms_latency: i32,
+            format: i32) !void
+    {
+        try self.session.logln(log.LogLevel.info, @src(),
+                "name {s} ms_latency {} format {}",
+                .{name, ms_latency, format});
+    }
+
+    //*************************************************************************
+    pub fn stop(self: *rdp_pulse_t) !void
+    {
+        try self.session.logln(log.LogLevel.info, @src(), "", .{});
+        if (self.pa_stream == null)
+        {
+            return;
+        }
+        c.pa_threaded_mainloop_lock(self.pa_mainloop);
+        defer c.pa_threaded_mainloop_unlock(self.pa_mainloop);
+        const operation = c.pa_stream_drain(self.pa_stream,
+                cb_pa_pulse_stream_success, self.pa_mainloop);
+        while (c.pa_operation_get_state(operation) == c.PA_OPERATION_RUNNING)
+        {
+            c.pa_threaded_mainloop_wait(self.pa_mainloop);
+        }
+    }
 };
 
 //*****************************************************************************
@@ -71,29 +97,16 @@ fn create_pa_mainloop() !*c.pa_threaded_mainloop
 }
 
 //*****************************************************************************
-fn create_pa_context(pa_mainloop: *c.pa_threaded_mainloop) !*c.pa_context
+fn create_pa_context(pa_mainloop: *c.pa_threaded_mainloop,
+        name: [:0]const u8) !*c.pa_context
 {
     const api = c.pa_threaded_mainloop_get_api(pa_mainloop);
-    const pa_context = c.pa_context_new(api, "xclient");
+    const pa_context = c.pa_context_new(api, name);
     if (pa_context) |apa_context|
     {
         return apa_context;
     }
     return PulseError.PaContext;
-}
-
-//*****************************************************************************
-fn cb_pa_context_state(context: ?*c.pa_context,
-        userdata: ?*anyopaque) callconv(.C) void
-{
-    const pa_mainloop: ?*c.pa_threaded_mainloop = @ptrCast(userdata);
-    const state = c.pa_context_get_state(context);
-    if ((state == c.PA_CONTEXT_READY) or
-            (state == c.PA_CONTEXT_FAILED) or
-            (state == c.PA_CONTEXT_TERMINATED))
-    {
-        c.pa_threaded_mainloop_signal(pa_mainloop, 0);
-    }
 }
 
 //*****************************************************************************
@@ -107,14 +120,14 @@ fn get_state_not_ready(pa_context: *c.pa_context,
 
 //*****************************************************************************
 pub fn create(session: *rdpc_session.rdp_session_t,
-        allocator: *const std.mem.Allocator) !*rdp_pulse_t
+        allocator: *const std.mem.Allocator, name: [:0]const u8) !*rdp_pulse_t
 {
     try session.logln(log.LogLevel.info, @src(), "pulse", .{});
     const self = try allocator.create(rdp_pulse_t);
     errdefer allocator.destroy(self);
     const pa_mainloop = try create_pa_mainloop();
     errdefer c.pa_threaded_mainloop_free(pa_mainloop);
-    const pa_context = try create_pa_context(pa_mainloop);
+    const pa_context = try create_pa_context(pa_mainloop, name);
     errdefer c.pa_context_unref(pa_context);
     c.pa_context_set_state_callback(pa_context, cb_pa_context_state,
             pa_mainloop);
@@ -135,4 +148,28 @@ pub fn create(session: *rdpc_session.rdp_session_t,
             .pa_mainloop = pa_mainloop, .pa_context = pa_context};
 
     return self;
+}
+
+//*****************************************************************************
+fn cb_pa_context_state(context: ?*c.pa_context,
+        userdata: ?*anyopaque) callconv(.C) void
+{
+    const pa_mainloop: ?*c.pa_threaded_mainloop = @ptrCast(userdata);
+    const state = c.pa_context_get_state(context);
+    if ((state == c.PA_CONTEXT_READY) or
+            (state == c.PA_CONTEXT_FAILED) or
+            (state == c.PA_CONTEXT_TERMINATED))
+    {
+        c.pa_threaded_mainloop_signal(pa_mainloop, 0);
+    }
+}
+
+//*****************************************************************************
+fn cb_pa_pulse_stream_success(stream: ?*c.pa_stream, success: c_int,
+        userdata: ?*anyopaque) callconv(.C) void
+{
+    _ = stream;
+    _ = success;
+    const pa_mainloop: ?*c.pa_threaded_mainloop = @ptrCast(userdata);
+    c.pa_threaded_mainloop_signal(pa_mainloop, 0);
 }
