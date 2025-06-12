@@ -20,6 +20,7 @@ const c = @cImport(
     @cInclude("librdpsnd.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
+    @cInclude("pulse/pulseaudio.h");
 });
 
 const MyError = error
@@ -686,7 +687,7 @@ pub const rdp_x11_t = struct
             {
                 self.pointer_cache = try self.allocator.alloc(c_ulong,
                         pointer_cache_size);
-                @memset(self.pointer_cache, 0);
+                @memset(self.pointer_cache, c.None);
             }
             try self.session.logln_devel(log.LogLevel.debug, @src(),
                     "pointer_cache_size {}", .{pointer_cache_size});

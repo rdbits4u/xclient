@@ -20,6 +20,7 @@ const c = @cImport(
     @cInclude("librdpsnd.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
+    @cInclude("pulse/pulseaudio.h");
 });
 
 var g_allocator: std.mem.Allocator = std.heap.c_allocator;

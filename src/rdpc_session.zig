@@ -2,6 +2,7 @@ const std = @import("std");
 const log = @import("log");
 const hexdump = @import("hexdump");
 const rdpc_x11 = @import("rdpc_x11.zig");
+const rdpc_pulse = @import("rdpc_pulse.zig");
 const net = std.net;
 const posix = std.posix;
 const c = @cImport(
@@ -19,6 +20,7 @@ const c = @cImport(
     @cInclude("librdpsnd.h");
     @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
+    @cInclude("pulse/pulseaudio.h");
 });
 
 const MyError = error
@@ -102,6 +104,7 @@ pub const rdp_session_t = struct
     send_head: ?*send_t = null,
     send_tail: ?*send_t = null,
     rdp_x11: ?*rdpc_x11.rdp_x11_t = null,
+    pulse: ?*rdpc_pulse.rdp_pulse_t = null,
 
     rfxdecoder: ?*anyopaque = null,
     ddata: []u8 = &.{},
@@ -121,6 +124,10 @@ pub const rdp_session_t = struct
         if (self.sck != -1)
         {
             posix.close(self.sck);
+        }
+        if (self.pulse) |apulse|
+        {
+            apulse.delete();
         }
         self.allocator.destroy(self);
     }
@@ -687,7 +694,7 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    fn log_msg_slice(self: *rdp_session_t, msg: []u8) !void
+    fn log_msg_slice(self: *rdp_session_t, msg: []const u8) !void
     {
         try self.logln(log.LogLevel.info, @src(), "[{s}]", .{msg});
     }
@@ -803,6 +810,12 @@ pub const rdp_session_t = struct
             block_no, num_formats});
         var sformats = std.ArrayList(c.format_t).init(self.allocator.*);
         defer sformats.deinit();
+
+        if (self.pulse == null)
+        {
+            self.pulse = try rdpc_pulse.create(self, self.allocator);
+        }
+
         for (0..num_formats) |index|
         {
             const format = &formats[index];
@@ -970,7 +983,7 @@ pub fn deinit() void
 //*****************************************************************************
 fn shm_info_init(size: usize, shm_info: *shm_info_t) !void
 {
-    shm_info.shmid = c.shmget(c.IPC_PRIVATE, size, c.IPC_CREAT | 0o777);
+    shm_info.shmid = c.shmget(c.IPC_PRIVATE, size, c.IPC_CREAT | 0o600);
     if (shm_info.shmid == -1) return error.shmget;
     errdefer _ = c.shmctl(shm_info.shmid, c.IPC_RMID, null);
     shm_info.ptr = c.shmat(shm_info.shmid, null, 0);
@@ -1003,39 +1016,15 @@ fn cb_rdpc_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
 {
     if (msg) |amsg|
     {
-        // get string length with max
-        var count: usize = 0;
-        while (amsg[count] != 0)
+        if (rdpc) |ardpc|
         {
-            count += 1;
-            if (count >= 8192)
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpc.user));
+            if (session) |asession|
             {
-                break;
-            }
-        }
-        if (count > 0)
-        {
-            if (rdpc) |ardpc|
-            {
-                const session: ?*rdp_session_t =
-                        @alignCast(@ptrCast(ardpc.user));
-                if (session) |asession|
-                {
-                    // alloc for copy
-                    const lmsg: []u8 = asession.allocator.alloc(u8,
-                            count) catch return c.LIBRDPC_ERROR_MEMORY;
-                    defer asession.allocator.free(lmsg);
-                    // make a copy
-                    var index: usize = 0;
-                    while (index < count)
-                    {
-                        lmsg[index] = amsg[index];
-                        index += 1;
-                    }
-                    asession.log_msg_slice(lmsg) catch
-                            return c.LIBRDPC_ERROR_MEMORY;
-                    return c.LIBRDPC_ERROR_NONE;
-                }
+                asession.log_msg_slice(std.mem.sliceTo(amsg, 0)) catch
+                        return c.LIBRDPC_ERROR_MEMORY;
+                return c.LIBRDPC_ERROR_NONE;
             }
         }
     }
@@ -1194,39 +1183,15 @@ fn cb_svc_log_msg(svc: ?*c.svc_channels_t,
 {
     if (msg) |amsg|
     {
-        // get string length with max
-        var count: usize = 0;
-        while (amsg[count] != 0)
+        if (svc) |asvc|
         {
-            count += 1;
-            if (count >= 8192)
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(asvc.user));
+            if (session) |asession|
             {
-                break;
-            }
-        }
-        if (count > 0)
-        {
-            if (svc) |asvc|
-            {
-                const session: ?*rdp_session_t =
-                        @alignCast(@ptrCast(asvc.user));
-                if (session) |asession|
-                {
-                    // alloc for copy
-                    const lmsg: []u8 = asession.allocator.alloc(u8,
-                            count) catch return c.LIBSVC_ERROR_MEMORY;
-                    defer asession.allocator.free(lmsg);
-                    // make a copy
-                    var index: usize = 0;
-                    while (index < count)
-                    {
-                        lmsg[index] = amsg[index];
-                        index += 1;
-                    }
-                    asession.log_msg_slice(lmsg) catch
-                            return c.LIBSVC_ERROR_MEMORY;
-                    return c.LIBSVC_ERROR_NONE;
-                }
+                asession.log_msg_slice(std.mem.sliceTo(amsg, 0)) catch
+                        return c.LIBSVC_ERROR_MEMORY;
+                return c.LIBSVC_ERROR_NONE;
             }
         }
     }
@@ -1270,39 +1235,15 @@ fn cb_cliprdr_log_msg(cliprdr: ?*c.cliprdr_t,
 {
     if (msg) |amsg|
     {
-        // get string length with max
-        var count: usize = 0;
-        while (amsg[count] != 0)
+        if (cliprdr) |acliprdr|
         {
-            count += 1;
-            if (count >= 8192)
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(acliprdr.user));
+            if (session) |asession|
             {
-                break;
-            }
-        }
-        if (count > 0)
-        {
-            if (cliprdr) |acliprdr|
-            {
-                const session: ?*rdp_session_t =
-                        @alignCast(@ptrCast(acliprdr.user));
-                if (session) |asession|
-                {
-                    // alloc for copy
-                    const lmsg: []u8 = asession.allocator.alloc(u8,
-                            count) catch return c.LIBCLIPRDR_ERROR_MEMORY;
-                    defer asession.allocator.free(lmsg);
-                    // make a copy
-                    var index: usize = 0;
-                    while (index < count)
-                    {
-                        lmsg[index] = amsg[index];
-                        index += 1;
-                    }
-                    asession.log_msg_slice(lmsg) catch
-                            return c.LIBCLIPRDR_ERROR_MEMORY;
-                    return c.LIBCLIPRDR_ERROR_NONE;
-                }
+                asession.log_msg_slice(std.mem.sliceTo(amsg, 0)) catch
+                        return c.LIBCLIPRDR_ERROR_MEMORY;
+                return c.LIBCLIPRDR_ERROR_NONE;
             }
         }
     }
@@ -1479,39 +1420,15 @@ fn cb_rdpsnd_log_msg(rdpsnd: ?*c.rdpsnd_t,
 {
     if (msg) |amsg|
     {
-        // get string length with max
-        var count: usize = 0;
-        while (amsg[count] != 0)
+        if (rdpsnd) |ardpsnd|
         {
-            count += 1;
-            if (count >= 8192)
+            const session: ?*rdp_session_t =
+                    @alignCast(@ptrCast(ardpsnd.user));
+            if (session) |asession|
             {
-                break;
-            }
-        }
-        if (count > 0)
-        {
-            if (rdpsnd) |ardpsnd|
-            {
-                const session: ?*rdp_session_t =
-                        @alignCast(@ptrCast(ardpsnd.user));
-                if (session) |asession|
-                {
-                    // alloc for copy
-                    const lmsg: []u8 = asession.allocator.alloc(u8,
-                            count) catch return c.LIBRDPSND_ERROR_MEMORY;
-                    defer asession.allocator.free(lmsg);
-                    // make a copy
-                    var index: usize = 0;
-                    while (index < count)
-                    {
-                        lmsg[index] = amsg[index];
-                        index += 1;
-                    }
-                    asession.log_msg_slice(lmsg) catch
-                            return c.LIBRDPSND_ERROR_MEMORY;
-                    return c.LIBRDPSND_ERROR_NONE;
-                }
+                asession.log_msg_slice(std.mem.sliceTo(amsg, 0)) catch
+                        return c.LIBRDPSND_ERROR_MEMORY;
+                return c.LIBRDPSND_ERROR_NONE;
             }
         }
     }
