@@ -45,6 +45,27 @@ pub const rdp_pulse_t = struct
     }
 
     //*************************************************************************
+    pub fn check_format(self: *rdp_pulse_t, wFormatTag: u16, nChannels: u16,
+            nSamplesPerSec: u32, nAvgBytesPerSec: u32, nBlockAlign: u16,
+            wBitsPerSample: u16) !bool
+    {
+        try self.session.logln(log.LogLevel.info, @src(),
+                "wFormatTag {} nChannels {} nSamplesPerSec {} " ++
+                "nAvgBytesPerSec {} nBlockAlign {} wBitsPerSample {}",
+                .{wFormatTag, nChannels, nSamplesPerSec,
+                nAvgBytesPerSec, nBlockAlign, wBitsPerSample});
+        if (wFormatTag != 1)
+        {
+            return false;
+        }
+        var sample_spec: c.pa_sample_spec = .{};
+        sample_spec.rate = nSamplesPerSec;
+        sample_spec.channels = @truncate(nChannels);
+        sample_spec.format = c.PA_SAMPLE_S16LE;
+        return c.pa_sample_spec_valid(&sample_spec) != 0;
+    }
+
+    //*************************************************************************
     pub fn start(self: *rdp_pulse_t, name: [:0]const u8, ms_latency: u32,
             format: u32) !void
     {
@@ -52,8 +73,13 @@ pub const rdp_pulse_t = struct
                 "name {s} ms_latency {} format {}",
                 .{name, ms_latency, format});
 
-        const sample_spec: c.pa_sample_spec = .{};
+        var sample_spec: c.pa_sample_spec = .{};
         const channel_map_p: ?*c.pa_channel_map = null;
+
+        sample_spec.rate = 44100;
+        sample_spec.channels = 2;
+        self.channels = 2;
+        sample_spec.format = c.PA_SAMPLE_S16LE;
 
         try err_if(c.pa_sample_spec_valid(&sample_spec) == 0, PulseError.PaValid);
         c.pa_threaded_mainloop_lock(self.pa_mainloop);

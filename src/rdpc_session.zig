@@ -799,7 +799,6 @@ pub const rdp_session_t = struct
                 try self.logln(log.LogLevel.info, @src(),
                         "rdpc_pulse.create ok", .{});
                 self.pulse = apulse;
-                try apulse.start("name1", 0, 0);
             }
             else |err|
             {
@@ -809,12 +808,35 @@ pub const rdp_session_t = struct
             }
         }
 
-        for (0..num_formats) |index|
+        // if (self.pulse) |apulse|
+        // {
+        //     const start_rv = apulse.start("name1", 0, 0);
+        //     if (start_rv) |_|
+        //     {
+        //         try self.logln(log.LogLevel.info, @src(),
+        //                 "pulse.start ok", .{});
+        //     }
+        //     else |err|
+        //     {
+        //         try self.logln(log.LogLevel.info, @src(),
+        //                 "pulse.start err {}", .{err});
+        //         return err;
+        //     }
+        // }
+
+        if (self.pulse) |apulse|
         {
-            const format = &formats[index];
-            if (format.wFormatTag == 1)
+            for (0..num_formats) |index|
             {
-                try sformats.append(format.*);
+                const format = &formats[index];
+                const format_ok = try apulse.check_format(format.wFormatTag,
+                        format.nChannels, format.nSamplesPerSec,
+                        format.nAvgBytesPerSec, format.nBlockAlign,
+                        format.wBitsPerSample);
+                if (format_ok)
+                {
+                    try sformats.append(format.*);
+                }
             }
         }
         return c.rdpsnd_send_formats(self.rdpsnd, channel_id, flags,
