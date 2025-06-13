@@ -5,23 +5,8 @@ const strings = @import("strings");
 const log = @import("log");
 const rdpc_session = @import("rdpc_session.zig");
 const posix = std.posix;
-const c = @cImport(
-{
-    @cInclude("sys/ipc.h");
-    @cInclude("sys/shm.h");
-    @cInclude("X11/Xlib.h");
-    @cInclude("X11/Xutil.h");
-    @cInclude("X11/Xatom.h");
-    @cInclude("X11/extensions/XShm.h");
-    @cInclude("X11/Xcursor/Xcursor.h");
-    @cInclude("librdpc.h");
-    @cInclude("libsvc.h");
-    @cInclude("libcliprdr.h");
-    @cInclude("librdpsnd.h");
-    @cInclude("pixman.h");
-    @cInclude("rfxcodec_decode.h");
-    @cInclude("pulse/pulseaudio.h");
-});
+
+const c = rdpc_session.c;
 
 var g_allocator: std.mem.Allocator = std.heap.c_allocator;
 

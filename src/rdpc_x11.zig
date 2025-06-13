@@ -5,25 +5,10 @@ const log = @import("log");
 const rdpc_session = @import("rdpc_session.zig");
 const net = std.net;
 const posix = std.posix;
-const c = @cImport(
-{
-    @cInclude("sys/ipc.h");
-    @cInclude("sys/shm.h");
-    @cInclude("X11/Xlib.h");
-    @cInclude("X11/Xutil.h");
-    @cInclude("X11/Xatom.h");
-    @cInclude("X11/extensions/XShm.h");
-    @cInclude("X11/Xcursor/Xcursor.h");
-    @cInclude("librdpc.h");
-    @cInclude("libsvc.h");
-    @cInclude("libcliprdr.h");
-    @cInclude("librdpsnd.h");
-    @cInclude("pixman.h");
-    @cInclude("rfxcodec_decode.h");
-    @cInclude("pulse/pulseaudio.h");
-});
 
-const MyError = error
+const c = rdpc_session.c;
+
+const X11Error = error
 {
     GetFds,
     BadPointerCacheIndex,
@@ -32,7 +17,7 @@ const MyError = error
 };
 
 //*****************************************************************************
-pub inline fn err_if(b: bool, err: MyError) !void
+pub inline fn err_if(b: bool, err: X11Error) !void
 {
     if (b) return err else return;
 }
@@ -95,7 +80,7 @@ pub const rdp_x11_t = struct
     pub fn get_fds(self: *rdp_x11_t, fds: []i32, timeout: *i32) ![]i32
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(), "fd {}", .{self.fd});
-        try err_if(fds.len < 1, MyError.GetFds);
+        try err_if(fds.len < 1, X11Error.GetFds);
         fds[0] = self.fd;
         _ = timeout;
         return fds[0..1];
@@ -748,7 +733,7 @@ pub const rdp_x11_t = struct
         const cur = c.XcursorImageLoadCursor(self.display, &ci);
         _ = c.XDefineCursor(self.display, self.window, cur);
         try err_if(pointer.cache_index >= self.pointer_cache.len,
-                MyError.BadPointerCacheIndex);
+                X11Error.BadPointerCacheIndex);
         self.pointer_cache[pointer.cache_index] = cur;
     }
 
@@ -758,7 +743,7 @@ pub const rdp_x11_t = struct
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "cache_index {}", .{cache_index});
         try err_if(cache_index >= self.pointer_cache.len,
-                MyError.BadPointerCacheIndex);
+                X11Error.BadPointerCacheIndex);
         _ = c.XDefineCursor(self.display, self.window,
                 self.pointer_cache[cache_index]);
     }
@@ -780,10 +765,10 @@ pub const rdp_x11_t = struct
 
         var rv = c.cliprdr_send_format_list_response(self.session.cliprdr,
                 channel_id, c.CB_RESPONSE_OK);
-        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, MyError.BadClipRdr);
+        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, X11Error.BadClipRdr);
 
         rv = c.cliprdr_send_data_request(self.session.cliprdr, channel_id, 1);
-        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, MyError.BadClipRdr);
+        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, X11Error.BadClipRdr);
     }
 
     //*************************************************************************
@@ -826,7 +811,7 @@ pub fn create(session: *rdpc_session.rdp_session_t,
     const self = try allocator.create(rdp_x11_t);
     errdefer allocator.destroy(self);
     const dis = c.XOpenDisplay(null);
-    const display = if (dis) |adis| adis else return MyError.BadOpenDisplay;
+    const display = if (dis) |adis| adis else return X11Error.BadOpenDisplay;
     errdefer _ = c.XCloseDisplay(display);
     self.* = .{.session = session, .allocator = allocator, .display = display};
     try self.session.logln(log.LogLevel.debug, @src(),

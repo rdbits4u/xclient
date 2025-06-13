@@ -5,25 +5,26 @@ const rdpc_x11 = @import("rdpc_x11.zig");
 const rdpc_pulse = @import("rdpc_pulse.zig");
 const net = std.net;
 const posix = std.posix;
-const c = @cImport(
+
+pub const c = @cImport(
 {
     @cInclude("sys/ipc.h");
     @cInclude("sys/shm.h");
+    @cInclude("pixman.h");
     @cInclude("X11/Xlib.h");
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
     @cInclude("X11/extensions/XShm.h");
     @cInclude("X11/Xcursor/Xcursor.h");
+    @cInclude("pulse/pulseaudio.h");
     @cInclude("librdpc.h");
     @cInclude("libsvc.h");
     @cInclude("libcliprdr.h");
     @cInclude("librdpsnd.h");
-    @cInclude("pixman.h");
     @cInclude("rfxcodec_decode.h");
-    @cInclude("pulse/pulseaudio.h");
 });
 
-const MyError = error
+const SesError = error
 {
     RegUnion,
     RegZero,
@@ -43,7 +44,7 @@ const MyError = error
 };
 
 //*****************************************************************************
-pub inline fn err_if(b: bool, err: MyError) !void
+pub inline fn err_if(b: bool, err: SesError) !void
 {
     if (b) return err else return;
 }
@@ -203,10 +204,7 @@ pub const rdp_session_t = struct
         errdefer self.cleanup_rfxdecoder();
         try self.logln_devel(log.LogLevel.info, @src(),
                 "rfxcodec_decode_create_ex rv {}", .{rv});
-        if (rv != 0)
-        {
-            return MyError.RfxDecoderCreate;
-        }
+        try err_if(rv != 0, SesError.RfxDecoderCreate);
         const size = @as(u32, 4) * awidth * aheight;
         try self.logln_devel(log.LogLevel.info, @src(),
                 "create awidth {} aheight {} size {} {} al {}",
@@ -223,7 +221,7 @@ pub const rdp_session_t = struct
         }
         else
         {
-            return MyError.RfxDecoderCreate;
+            return SesError.RfxDecoderCreate;
         }
     }
 
@@ -244,10 +242,7 @@ pub const rdp_session_t = struct
         const reg = try self.allocator.create(c.pixman_region16_t);
         errdefer self.allocator.destroy(reg);
         reg.* = .{};
-        if (num_rects < 1)
-        {
-            return MyError.RegZero;
-        }
+        try err_if(num_rects < 1, SesError.RegZero);
         if (rects) |arects|
         {
             try self.logln_devel(log.LogLevel.info, @src(),
@@ -270,10 +265,7 @@ pub const rdp_session_t = struct
                         arects[index].x, arects[index].y,
                         @bitCast(arects[index].cx),
                         @bitCast(arects[index].cy));
-                if (pixman_bool == 0)
-                {
-                    return MyError.RegUnion;
-                }
+                try err_if(pixman_bool == 0, SesError.RegUnion);
             }
         }
         return reg;
@@ -286,10 +278,7 @@ pub const rdp_session_t = struct
         const reg = try self.allocator.create(c.pixman_region16_t);
         errdefer self.allocator.destroy(reg);
         reg.* = .{};
-        if (num_tiles < 1)
-        {
-            return MyError.RegZero;
-        }
+        try err_if(num_tiles < 1, SesError.RegZero);
         if (tiles) |atiles|
         {
             try self.logln_devel(log.LogLevel.info, @src(),
@@ -312,10 +301,7 @@ pub const rdp_session_t = struct
                         atiles[index].x, atiles[index].y,
                         @bitCast(atiles[index].cx),
                         @bitCast(atiles[index].cy));
-                if (pixman_bool == 0)
-                {
-                    return MyError.RegUnion;
-                }
+                try err_if(pixman_bool == 0, SesError.RegUnion);
             }
         }
         return reg;
@@ -478,10 +464,7 @@ pub const rdp_session_t = struct
             const address_list = try std.net.getAddressList(self.allocator.*,
                     server, port_u16);
             defer address_list.deinit();
-            if (address_list.addrs.len < 1)
-            {
-                return MyError.LookupAddress;
-            }
+            try err_if(address_list.addrs.len < 1, SesError.LookupAddress);
             address = address_list.addrs[0];
         }
         try self.logln(log.LogLevel.info, @src(), "connecting to {}",
@@ -520,10 +503,7 @@ pub const rdp_session_t = struct
                 .{recv_rv, self.recv_start});
         if (recv_rv > 0)
         {
-            if (!self.connected)
-            {
-                return MyError.Connect;
-            }
+            try err_if(!self.connected, SesError.Connect);
             var end = self.recv_start + recv_rv;
             while (end > 0)
             {
@@ -552,13 +532,13 @@ pub const rdp_session_t = struct
                     try self.logln(log.LogLevel.debug, @src(),
                             "rdpc_process_server_data error {}",
                             .{rv});
-                    return MyError.RdpcProcessServerData;
+                    return SesError.RdpcProcessServerData;
                 }
             }
         }
         else
         {
-            return MyError.Connect;
+            return SesError.Connect;
         }
     }
 
@@ -576,7 +556,7 @@ pub const rdp_session_t = struct
                 try self.logln(log.LogLevel.err,
                         @src(), "rdpc_start failed error {}",
                         .{rv});
-                return MyError.RdpcStart;
+                return SesError.RdpcStart;
             }
             const width = self.rdpc.cgcc.core.desktopWidth;
             const height = self.rdpc.cgcc.core.desktopHeight;
@@ -607,7 +587,7 @@ pub const rdp_session_t = struct
             }
             else
             {
-                return MyError.Connect;
+                return SesError.Connect;
             }
         }
     }
@@ -813,11 +793,19 @@ pub const rdp_session_t = struct
 
         if (self.pulse == null)
         {
-            self.pulse = try rdpc_pulse.create(self, self.allocator,
-                    "xclient");
-            if (self.pulse) |apulse|
+            const pulse = rdpc_pulse.create(self, self.allocator, "xclient");
+            if (pulse) |apulse|
             {
-                //try apulse.start("hi", 0, 0);
+                try self.logln(log.LogLevel.info, @src(),
+                        "rdpc_pulse.create ok", .{});
+                self.pulse = apulse;
+                try apulse.start("name1", 0, 0);
+            }
+            else |err|
+            {
+                try self.logln(log.LogLevel.info, @src(),
+                        "rdpc_pulse.create err {}", .{err});
+                return err;
             }
         }
 
@@ -848,7 +836,7 @@ fn create_rdpc(settings: *c.rdpc_settings_t) !*c.rdpc_t
             return ardpc;
         }
     }
-    return MyError.RdpcCreate;
+    return SesError.RdpcCreate;
 }
 
 //*****************************************************************************
@@ -863,7 +851,7 @@ fn create_svc() !*c.svc_channels_t
             return asvc;
         }
     }
-    return MyError.SvcCreate;
+    return SesError.SvcCreate;
 }
 
 //*****************************************************************************
@@ -878,7 +866,7 @@ fn create_cliprdr() !*c.cliprdr_t
             return acliprdr;
         }
     }
-    return MyError.CliprdrCreate;
+    return SesError.CliprdrCreate;
 }
 
 //*****************************************************************************
@@ -893,7 +881,7 @@ fn create_rdpsnd() !*c.rdpsnd_t
             return ardpsnd;
         }
     }
-    return MyError.RdpsndCreate;
+    return SesError.RdpsndCreate;
 }
 
 //*****************************************************************************
@@ -970,10 +958,10 @@ pub fn create(allocator: *const std.mem.Allocator,
 //*****************************************************************************
 pub fn init() !void
 {
-    try err_if(c.rdpc_init() != c.LIBRDPC_ERROR_NONE, MyError.RdpcInit);
-    try err_if(c.svc_init() != c.LIBSVC_ERROR_NONE, MyError.SvcInit);
-    try err_if(c.cliprdr_init() != c.LIBCLIPRDR_ERROR_NONE, MyError.CliprdrInit);
-    try err_if(c.rdpsnd_init() != c.LIBRDPSND_ERROR_NONE, MyError.RdpsndInit);
+    try err_if(c.rdpc_init() != c.LIBRDPC_ERROR_NONE, SesError.RdpcInit);
+    try err_if(c.svc_init() != c.LIBSVC_ERROR_NONE, SesError.SvcInit);
+    try err_if(c.cliprdr_init() != c.LIBCLIPRDR_ERROR_NONE, SesError.CliprdrInit);
+    try err_if(c.rdpsnd_init() != c.LIBRDPSND_ERROR_NONE, SesError.RdpsndInit);
 }
 
 //*****************************************************************************
