@@ -56,6 +56,168 @@ pub const rdp_x11_t = struct
     need_keyboard_sync: bool = false,
 
     //*************************************************************************
+    pub fn create(session: *rdpc_session.rdp_session_t,
+            allocator: *const std.mem.Allocator,
+            width: u16, height: u16) !*rdp_x11_t
+    {
+        const self = try allocator.create(rdp_x11_t);
+        errdefer allocator.destroy(self);
+        const dis = c.XOpenDisplay(null);
+        const display = if (dis) |adis| adis else return X11Error.BadOpenDisplay;
+        errdefer _ = c.XCloseDisplay(display);
+        self.* = .{.session = session, .allocator = allocator, .display = display};
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "rdp_x11_t width {} height {}", .{width, height});
+        self.width = width;
+        self.height = height;
+        self.fd = c.XConnectionNumber(self.display);
+        self.screen_number = c.DefaultScreen(self.display);
+        self.white = c.WhitePixel(self.display, self.screen_number);
+        self.black = c.BlackPixel(self.display, self.screen_number);
+        self.screen = c.DefaultScreen(self.display);
+        self.depth = @bitCast(c.DefaultDepth(self.display, self.screen));
+        self.visual = c.DefaultVisual(self.display, self.screen);
+        self.root_window = c.DefaultRootWindow(self.display);
+        // create window
+        try self.create_window();
+        // window event mask
+        const event_mask: c_long = c.StructureNotifyMask |
+                c.VisibilityChangeMask | c.ButtonPressMask |
+                c.ButtonReleaseMask | c.KeyPressMask | c.KeyReleaseMask |
+                c.ExposureMask | c.PointerMotionMask | c.ExposureMask |
+                c.FocusChangeMask;
+        _ = c.XSelectInput(self.display, self.window, event_mask);
+        _ = c.XMapWindow(self.display, self.window);
+        // create gc
+        var gcv: c.XGCValues = .{};
+        self.gc = c.XCreateGC(self.display, self.window,
+                c.GCGraphicsExposures, &gcv);
+        // pixmap
+        try self.check_pixmap(self.width, self.height);
+        // check for Xshm
+        self.got_xshm = c.XShmQueryExtension(self.display) != 0;
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "got_xshm {}", .{self.got_xshm});
+        // flush to send all requests to xserver
+        _ = c.XFlush(self.display);
+
+        for (0..256) |index|
+        {
+            self.keymap[index] = .{.code = 0, .flags = .{0, 0}};
+        }
+        self.keymap[9] =   .{.code = 1,  .flags = .{0x0000, 0x8000}}; // Esc
+        self.keymap[10] =  .{.code = 2,  .flags = .{0x0000, 0x8000}}; // 1
+        self.keymap[11] =  .{.code = 3,  .flags = .{0x0000, 0x8000}}; // 2
+        self.keymap[12] =  .{.code = 4,  .flags = .{0x0000, 0x8000}}; // 3
+        self.keymap[13] =  .{.code = 5,  .flags = .{0x0000, 0x8000}}; // 4
+        self.keymap[14] =  .{.code = 6,  .flags = .{0x0000, 0x8000}}; // 5
+        self.keymap[15] =  .{.code = 7,  .flags = .{0x0000, 0x8000}}; // 6
+        self.keymap[16] =  .{.code = 8,  .flags = .{0x0000, 0x8000}}; // 7
+        self.keymap[17] =  .{.code = 9,  .flags = .{0x0000, 0x8000}}; // 8
+        self.keymap[18] =  .{.code = 10, .flags = .{0x0000, 0x8000}}; // 9
+        self.keymap[19] =  .{.code = 11, .flags = .{0x0000, 0x8000}}; // 0
+        self.keymap[20] =  .{.code = 12, .flags = .{0x0000, 0x8000}}; // -
+        self.keymap[21] =  .{.code = 13, .flags = .{0x0000, 0x8000}}; // =
+        self.keymap[22] =  .{.code = 14, .flags = .{0x0000, 0x8000}}; // backspace
+        self.keymap[23] =  .{.code = 15, .flags = .{0x0000, 0x8000}}; // Tab
+        self.keymap[24] =  .{.code = 16, .flags = .{0x0000, 0x8000}}; // Q
+        self.keymap[25] =  .{.code = 17, .flags = .{0x0000, 0x8000}}; // W
+        self.keymap[26] =  .{.code = 18, .flags = .{0x0000, 0x8000}}; // E
+        self.keymap[27] =  .{.code = 19, .flags = .{0x0000, 0x8000}}; // R
+        self.keymap[28] =  .{.code = 20, .flags = .{0x0000, 0x8000}}; // T
+        self.keymap[29] =  .{.code = 21, .flags = .{0x0000, 0x8000}}; // Y
+        self.keymap[30] =  .{.code = 22, .flags = .{0x0000, 0x8000}}; // U
+        self.keymap[31] =  .{.code = 23, .flags = .{0x0000, 0x8000}}; // I
+        self.keymap[32] =  .{.code = 24, .flags = .{0x0000, 0x8000}}; // O
+        self.keymap[33] =  .{.code = 25, .flags = .{0x0000, 0x8000}}; // P
+        self.keymap[34] =  .{.code = 26, .flags = .{0x0000, 0x8000}}; // [
+        self.keymap[35] =  .{.code = 27, .flags = .{0x0000, 0x8000}}; // ]
+        self.keymap[36] =  .{.code = 28, .flags = .{0x0000, 0x8000}}; // Enter
+        self.keymap[37] =  .{.code = 29, .flags = .{0x0000, 0xC000}}; // left Ctrl
+        self.keymap[38] =  .{.code = 30, .flags = .{0x0000, 0x8000}}; // A
+        self.keymap[39] =  .{.code = 31, .flags = .{0x0000, 0x8000}}; // S
+        self.keymap[40] =  .{.code = 32, .flags = .{0x0000, 0x8000}}; // D
+        self.keymap[41] =  .{.code = 33, .flags = .{0x0000, 0x8000}}; // F
+        self.keymap[42] =  .{.code = 34, .flags = .{0x0000, 0x8000}}; // G
+        self.keymap[43] =  .{.code = 35, .flags = .{0x0000, 0x8000}}; // H
+        self.keymap[44] =  .{.code = 36, .flags = .{0x0000, 0x8000}}; // J
+        self.keymap[45] =  .{.code = 37, .flags = .{0x0000, 0x8000}}; // K
+        self.keymap[46] =  .{.code = 38, .flags = .{0x0000, 0x8000}}; // L
+        self.keymap[47] =  .{.code = 39, .flags = .{0x0000, 0x8000}}; // ;
+        self.keymap[48] =  .{.code = 40, .flags = .{0x0000, 0x8000}}; // '
+        self.keymap[49] =  .{.code = 41, .flags = .{0x0000, 0x8000}}; // `
+        self.keymap[50] =  .{.code = 42, .flags = .{0x0000, 0xC000}}; // left Shift
+        self.keymap[51] =  .{.code = 43, .flags = .{0x0000, 0x8000}}; // \
+        self.keymap[52] =  .{.code = 44, .flags = .{0x0000, 0x8000}}; // Z
+        self.keymap[53] =  .{.code = 45, .flags = .{0x0000, 0x8000}}; // X
+        self.keymap[54] =  .{.code = 46, .flags = .{0x0000, 0x8000}}; // C
+        self.keymap[55] =  .{.code = 47, .flags = .{0x0000, 0x8000}}; // V
+        self.keymap[56] =  .{.code = 48, .flags = .{0x0000, 0x8000}}; // B
+        self.keymap[57] =  .{.code = 49, .flags = .{0x0000, 0x8000}}; // N
+        self.keymap[58] =  .{.code = 50, .flags = .{0x0000, 0x8000}}; // M
+        self.keymap[59] =  .{.code = 51, .flags = .{0x0000, 0x8000}}; // ,
+        self.keymap[60] =  .{.code = 52, .flags = .{0x0000, 0x8000}}; // .
+        self.keymap[61] =  .{.code = 53, .flags = .{0x0000, 0x8000}}; // /
+        self.keymap[62] =  .{.code = 54, .flags = .{0x0000, 0xC000}}; // right Shift
+        self.keymap[63] =  .{.code = 55, .flags = .{0x0000, 0x8000}}; // NP *
+        self.keymap[64] =  .{.code = 56, .flags = .{0x0000, 0xC000}}; // left Alt
+        self.keymap[65] =  .{.code = 57, .flags = .{0x0000, 0x8000}}; // Space
+        self.keymap[66] =  .{.code = 58, .flags = .{0x0000, 0xC000}}; // Caps Lock
+        self.keymap[67] =  .{.code = 59, .flags = .{0x0000, 0x8000}}; // F1
+        self.keymap[68] =  .{.code = 60, .flags = .{0x0000, 0x8000}}; // F2
+        self.keymap[69] =  .{.code = 61, .flags = .{0x0000, 0x8000}}; // F3
+        self.keymap[70] =  .{.code = 62, .flags = .{0x0000, 0x8000}}; // F4
+        self.keymap[71] =  .{.code = 63, .flags = .{0x0000, 0x8000}}; // F5
+        self.keymap[72] =  .{.code = 64, .flags = .{0x0000, 0x8000}}; // F6
+        self.keymap[73] =  .{.code = 65, .flags = .{0x0000, 0x8000}}; // F7
+        self.keymap[74] =  .{.code = 66, .flags = .{0x0000, 0x8000}}; // F8
+        self.keymap[75] =  .{.code = 67, .flags = .{0x0000, 0x8000}}; // F9
+        self.keymap[76] =  .{.code = 68, .flags = .{0x0000, 0x8000}}; // F10
+        self.keymap[77] =  .{.code = 69, .flags = .{0x0000, 0xC000}}; // Num Lock
+        self.keymap[78] =  .{.code = 70, .flags = .{0x0000, 0xC000}}; // Scroll Lock
+        self.keymap[79] =  .{.code = 71, .flags = .{0x0000, 0x8000}}; // NP 7
+        self.keymap[80] =  .{.code = 72, .flags = .{0x0000, 0x8000}}; // NP 8
+        self.keymap[81] =  .{.code = 73, .flags = .{0x0000, 0x8000}}; // NP 9
+        self.keymap[82] =  .{.code = 74, .flags = .{0x0000, 0x8000}}; // NP -
+        self.keymap[83] =  .{.code = 75, .flags = .{0x0000, 0x8000}}; // NP 4
+        self.keymap[84] =  .{.code = 76, .flags = .{0x0000, 0x8000}}; // NP 5
+        self.keymap[85] =  .{.code = 77, .flags = .{0x0000, 0x8000}}; // NP 6
+        self.keymap[86] =  .{.code = 78, .flags = .{0x0000, 0x8000}}; // NP +
+        self.keymap[87] =  .{.code = 79, .flags = .{0x0000, 0x8000}}; // NP 1
+        self.keymap[88] =  .{.code = 80, .flags = .{0x0000, 0x8000}}; // NP 2
+        self.keymap[89] =  .{.code = 81, .flags = .{0x0000, 0x8000}}; // NP 3
+        self.keymap[90] =  .{.code = 82, .flags = .{0x0000, 0x8000}}; // NP 0
+        self.keymap[91] =  .{.code = 83, .flags = .{0x0000, 0x8000}}; // NP .
+
+        self.keymap[95] =  .{.code = 87, .flags = .{0x0000, 0x8000}}; // F11
+        self.keymap[96] =  .{.code = 88, .flags = .{0x0000, 0x8000}}; // F12
+
+        self.keymap[104] = .{.code = 28, .flags = .{0x0100, 0xC100}}; // KP Enter
+        self.keymap[105] = .{.code = 29, .flags = .{0x0100, 0xC100}}; // right Ctrl
+        self.keymap[106] = .{.code = 53, .flags = .{0x0100, 0x8100}}; // NP /
+
+        self.keymap[108] = .{.code = 56, .flags = .{0x0100, 0xC100}}; // right Alt
+
+        self.keymap[110] = .{.code = 71, .flags = .{0x0100, 0x8100}}; // Home
+        self.keymap[111] = .{.code = 72, .flags = .{0x0100, 0x8100}}; // up arrow
+        self.keymap[112] = .{.code = 73, .flags = .{0x0100, 0x8100}}; // Page Up
+        self.keymap[113] = .{.code = 75, .flags = .{0x0100, 0x8100}}; // left arrow
+        self.keymap[114] = .{.code = 77, .flags = .{0x0100, 0x8100}}; // right arrow
+        self.keymap[115] = .{.code = 79, .flags = .{0x0100, 0x8100}}; // End
+        self.keymap[116] = .{.code = 80, .flags = .{0x0100, 0x8100}}; // down arrow
+        self.keymap[117] = .{.code = 81, .flags = .{0x0100, 0x8100}}; // Page Down
+        self.keymap[118] = .{.code = 82, .flags = .{0x0100, 0x8100}}; // Insert
+        self.keymap[119] = .{.code = 83, .flags = .{0x0100, 0x8100}}; // Delete
+
+        self.keymap[127] = .{.code = 29, .flags = .{0x0200, 0x8200}}; // Pause
+
+        self.keymap[134] = .{.code = 92, .flags = .{0x0100, 0x8100}}; // right Win
+        self.keymap[135] = .{.code = 93, .flags = .{0x0100, 0x8100}}; // menu
+
+        return self;
+    }
+
+    //*************************************************************************
     pub fn delete(self: *rdp_x11_t) void
     {
         for (self.pointer_cache) |cur|
@@ -802,165 +964,3 @@ pub const rdp_x11_t = struct
     }
 
 };
-
-//*****************************************************************************
-pub fn create(session: *rdpc_session.rdp_session_t,
-        allocator: *const std.mem.Allocator,
-        width: u16, height: u16) !*rdp_x11_t
-{
-    const self = try allocator.create(rdp_x11_t);
-    errdefer allocator.destroy(self);
-    const dis = c.XOpenDisplay(null);
-    const display = if (dis) |adis| adis else return X11Error.BadOpenDisplay;
-    errdefer _ = c.XCloseDisplay(display);
-    self.* = .{.session = session, .allocator = allocator, .display = display};
-    try self.session.logln(log.LogLevel.debug, @src(),
-            "rdp_x11_t width {} height {}", .{width, height});
-    self.width = width;
-    self.height = height;
-    self.fd = c.XConnectionNumber(self.display);
-    self.screen_number = c.DefaultScreen(self.display);
-    self.white = c.WhitePixel(self.display, self.screen_number);
-    self.black = c.BlackPixel(self.display, self.screen_number);
-    self.screen = c.DefaultScreen(self.display);
-    self.depth = @bitCast(c.DefaultDepth(self.display, self.screen));
-    self.visual = c.DefaultVisual(self.display, self.screen);
-    self.root_window = c.DefaultRootWindow(self.display);
-    // create window
-    try self.create_window();
-    // window event mask
-    const event_mask: c_long = c.StructureNotifyMask |
-            c.VisibilityChangeMask | c.ButtonPressMask |
-            c.ButtonReleaseMask | c.KeyPressMask | c.KeyReleaseMask |
-            c.ExposureMask | c.PointerMotionMask | c.ExposureMask |
-            c.FocusChangeMask;
-    _ = c.XSelectInput(self.display, self.window, event_mask);
-    _ = c.XMapWindow(self.display, self.window);
-    // create gc
-    var gcv: c.XGCValues = .{};
-    self.gc = c.XCreateGC(self.display, self.window,
-            c.GCGraphicsExposures, &gcv);
-    // pixmap
-    try self.check_pixmap(self.width, self.height);
-    // check for Xshm
-    self.got_xshm = c.XShmQueryExtension(self.display) != 0;
-    try self.session.logln(log.LogLevel.debug, @src(),
-            "got_xshm {}", .{self.got_xshm});
-    // flush to send all requests to xserver
-    _ = c.XFlush(self.display);
-
-    for (0..256) |index|
-    {
-        self.keymap[index] = .{.code = 0, .flags = .{0, 0}};
-    }
-    self.keymap[9] =   .{.code = 1,  .flags = .{0x0000, 0x8000}}; // Esc
-    self.keymap[10] =  .{.code = 2,  .flags = .{0x0000, 0x8000}}; // 1
-    self.keymap[11] =  .{.code = 3,  .flags = .{0x0000, 0x8000}}; // 2
-    self.keymap[12] =  .{.code = 4,  .flags = .{0x0000, 0x8000}}; // 3
-    self.keymap[13] =  .{.code = 5,  .flags = .{0x0000, 0x8000}}; // 4
-    self.keymap[14] =  .{.code = 6,  .flags = .{0x0000, 0x8000}}; // 5
-    self.keymap[15] =  .{.code = 7,  .flags = .{0x0000, 0x8000}}; // 6
-    self.keymap[16] =  .{.code = 8,  .flags = .{0x0000, 0x8000}}; // 7
-    self.keymap[17] =  .{.code = 9,  .flags = .{0x0000, 0x8000}}; // 8
-    self.keymap[18] =  .{.code = 10, .flags = .{0x0000, 0x8000}}; // 9
-    self.keymap[19] =  .{.code = 11, .flags = .{0x0000, 0x8000}}; // 0
-    self.keymap[20] =  .{.code = 12, .flags = .{0x0000, 0x8000}}; // -
-    self.keymap[21] =  .{.code = 13, .flags = .{0x0000, 0x8000}}; // =
-    self.keymap[22] =  .{.code = 14, .flags = .{0x0000, 0x8000}}; // backspace
-    self.keymap[23] =  .{.code = 15, .flags = .{0x0000, 0x8000}}; // Tab
-    self.keymap[24] =  .{.code = 16, .flags = .{0x0000, 0x8000}}; // Q
-    self.keymap[25] =  .{.code = 17, .flags = .{0x0000, 0x8000}}; // W
-    self.keymap[26] =  .{.code = 18, .flags = .{0x0000, 0x8000}}; // E
-    self.keymap[27] =  .{.code = 19, .flags = .{0x0000, 0x8000}}; // R
-    self.keymap[28] =  .{.code = 20, .flags = .{0x0000, 0x8000}}; // T
-    self.keymap[29] =  .{.code = 21, .flags = .{0x0000, 0x8000}}; // Y
-    self.keymap[30] =  .{.code = 22, .flags = .{0x0000, 0x8000}}; // U
-    self.keymap[31] =  .{.code = 23, .flags = .{0x0000, 0x8000}}; // I
-    self.keymap[32] =  .{.code = 24, .flags = .{0x0000, 0x8000}}; // O
-    self.keymap[33] =  .{.code = 25, .flags = .{0x0000, 0x8000}}; // P
-    self.keymap[34] =  .{.code = 26, .flags = .{0x0000, 0x8000}}; // [
-    self.keymap[35] =  .{.code = 27, .flags = .{0x0000, 0x8000}}; // ]
-    self.keymap[36] =  .{.code = 28, .flags = .{0x0000, 0x8000}}; // Enter
-    self.keymap[37] =  .{.code = 29, .flags = .{0x0000, 0xC000}}; // left Ctrl
-    self.keymap[38] =  .{.code = 30, .flags = .{0x0000, 0x8000}}; // A
-    self.keymap[39] =  .{.code = 31, .flags = .{0x0000, 0x8000}}; // S
-    self.keymap[40] =  .{.code = 32, .flags = .{0x0000, 0x8000}}; // D
-    self.keymap[41] =  .{.code = 33, .flags = .{0x0000, 0x8000}}; // F
-    self.keymap[42] =  .{.code = 34, .flags = .{0x0000, 0x8000}}; // G
-    self.keymap[43] =  .{.code = 35, .flags = .{0x0000, 0x8000}}; // H
-    self.keymap[44] =  .{.code = 36, .flags = .{0x0000, 0x8000}}; // J
-    self.keymap[45] =  .{.code = 37, .flags = .{0x0000, 0x8000}}; // K
-    self.keymap[46] =  .{.code = 38, .flags = .{0x0000, 0x8000}}; // L
-    self.keymap[47] =  .{.code = 39, .flags = .{0x0000, 0x8000}}; // ;
-    self.keymap[48] =  .{.code = 40, .flags = .{0x0000, 0x8000}}; // '
-    self.keymap[49] =  .{.code = 41, .flags = .{0x0000, 0x8000}}; // `
-    self.keymap[50] =  .{.code = 42, .flags = .{0x0000, 0xC000}}; // left Shift
-    self.keymap[51] =  .{.code = 43, .flags = .{0x0000, 0x8000}}; // \
-    self.keymap[52] =  .{.code = 44, .flags = .{0x0000, 0x8000}}; // Z
-    self.keymap[53] =  .{.code = 45, .flags = .{0x0000, 0x8000}}; // X
-    self.keymap[54] =  .{.code = 46, .flags = .{0x0000, 0x8000}}; // C
-    self.keymap[55] =  .{.code = 47, .flags = .{0x0000, 0x8000}}; // V
-    self.keymap[56] =  .{.code = 48, .flags = .{0x0000, 0x8000}}; // B
-    self.keymap[57] =  .{.code = 49, .flags = .{0x0000, 0x8000}}; // N
-    self.keymap[58] =  .{.code = 50, .flags = .{0x0000, 0x8000}}; // M
-    self.keymap[59] =  .{.code = 51, .flags = .{0x0000, 0x8000}}; // ,
-    self.keymap[60] =  .{.code = 52, .flags = .{0x0000, 0x8000}}; // .
-    self.keymap[61] =  .{.code = 53, .flags = .{0x0000, 0x8000}}; // /
-    self.keymap[62] =  .{.code = 54, .flags = .{0x0000, 0xC000}}; // right Shift
-    self.keymap[63] =  .{.code = 55, .flags = .{0x0000, 0x8000}}; // NP *
-    self.keymap[64] =  .{.code = 56, .flags = .{0x0000, 0xC000}}; // left Alt
-    self.keymap[65] =  .{.code = 57, .flags = .{0x0000, 0x8000}}; // Space
-    self.keymap[66] =  .{.code = 58, .flags = .{0x0000, 0xC000}}; // Caps Lock
-    self.keymap[67] =  .{.code = 59, .flags = .{0x0000, 0x8000}}; // F1
-    self.keymap[68] =  .{.code = 60, .flags = .{0x0000, 0x8000}}; // F2
-    self.keymap[69] =  .{.code = 61, .flags = .{0x0000, 0x8000}}; // F3
-    self.keymap[70] =  .{.code = 62, .flags = .{0x0000, 0x8000}}; // F4
-    self.keymap[71] =  .{.code = 63, .flags = .{0x0000, 0x8000}}; // F5
-    self.keymap[72] =  .{.code = 64, .flags = .{0x0000, 0x8000}}; // F6
-    self.keymap[73] =  .{.code = 65, .flags = .{0x0000, 0x8000}}; // F7
-    self.keymap[74] =  .{.code = 66, .flags = .{0x0000, 0x8000}}; // F8
-    self.keymap[75] =  .{.code = 67, .flags = .{0x0000, 0x8000}}; // F9
-    self.keymap[76] =  .{.code = 68, .flags = .{0x0000, 0x8000}}; // F10
-    self.keymap[77] =  .{.code = 69, .flags = .{0x0000, 0xC000}}; // Num Lock
-    self.keymap[78] =  .{.code = 70, .flags = .{0x0000, 0xC000}}; // Scroll Lock
-    self.keymap[79] =  .{.code = 71, .flags = .{0x0000, 0x8000}}; // NP 7
-    self.keymap[80] =  .{.code = 72, .flags = .{0x0000, 0x8000}}; // NP 8
-    self.keymap[81] =  .{.code = 73, .flags = .{0x0000, 0x8000}}; // NP 9
-    self.keymap[82] =  .{.code = 74, .flags = .{0x0000, 0x8000}}; // NP -
-    self.keymap[83] =  .{.code = 75, .flags = .{0x0000, 0x8000}}; // NP 4
-    self.keymap[84] =  .{.code = 76, .flags = .{0x0000, 0x8000}}; // NP 5
-    self.keymap[85] =  .{.code = 77, .flags = .{0x0000, 0x8000}}; // NP 6
-    self.keymap[86] =  .{.code = 78, .flags = .{0x0000, 0x8000}}; // NP +
-    self.keymap[87] =  .{.code = 79, .flags = .{0x0000, 0x8000}}; // NP 1
-    self.keymap[88] =  .{.code = 80, .flags = .{0x0000, 0x8000}}; // NP 2
-    self.keymap[89] =  .{.code = 81, .flags = .{0x0000, 0x8000}}; // NP 3
-    self.keymap[90] =  .{.code = 82, .flags = .{0x0000, 0x8000}}; // NP 0
-    self.keymap[91] =  .{.code = 83, .flags = .{0x0000, 0x8000}}; // NP .
-
-    self.keymap[95] =  .{.code = 87, .flags = .{0x0000, 0x8000}}; // F11
-    self.keymap[96] =  .{.code = 88, .flags = .{0x0000, 0x8000}}; // F12
-
-    self.keymap[104] = .{.code = 28, .flags = .{0x0100, 0xC100}}; // KP Enter
-    self.keymap[105] = .{.code = 29, .flags = .{0x0100, 0xC100}}; // right Ctrl
-    self.keymap[106] = .{.code = 53, .flags = .{0x0100, 0x8100}}; // NP /
-
-    self.keymap[108] = .{.code = 56, .flags = .{0x0100, 0xC100}}; // right Alt
-
-    self.keymap[110] = .{.code = 71, .flags = .{0x0100, 0x8100}}; // Home
-    self.keymap[111] = .{.code = 72, .flags = .{0x0100, 0x8100}}; // up arrow
-    self.keymap[112] = .{.code = 73, .flags = .{0x0100, 0x8100}}; // Page Up
-    self.keymap[113] = .{.code = 75, .flags = .{0x0100, 0x8100}}; // left arrow
-    self.keymap[114] = .{.code = 77, .flags = .{0x0100, 0x8100}}; // right arrow
-    self.keymap[115] = .{.code = 79, .flags = .{0x0100, 0x8100}}; // End
-    self.keymap[116] = .{.code = 80, .flags = .{0x0100, 0x8100}}; // down arrow
-    self.keymap[117] = .{.code = 81, .flags = .{0x0100, 0x8100}}; // Page Down
-    self.keymap[118] = .{.code = 82, .flags = .{0x0100, 0x8100}}; // Insert
-    self.keymap[119] = .{.code = 83, .flags = .{0x0100, 0x8100}}; // Delete
-
-    self.keymap[127] = .{.code = 29, .flags = .{0x0200, 0x8200}}; // Pause
-
-    self.keymap[134] = .{.code = 92, .flags = .{0x0100, 0x8100}}; // right Win
-    self.keymap[135] = .{.code = 93, .flags = .{0x0100, 0x8100}}; // menu
-
-    return self;
-}

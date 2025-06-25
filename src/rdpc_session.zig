@@ -76,6 +76,16 @@ const shm_info_t = struct
 	ptr: ?*anyopaque = null,
 };
 
+const audio_t = struct
+{
+    played: usize = 0,
+    channel_id: u16 = 0,
+    time_stamp: u16 = 0,
+    block_no: u8 = 0,
+    slice: []u8 = &.{},
+    next: ?*audio_t = null,
+};
+
 // for storing left over data for server
 const send_t = struct
 {
@@ -90,6 +100,62 @@ pub const rdp_connect_t = struct
     server_port: [64]u8 = std.mem.zeroes([64]u8),
 };
 
+pub const rdpsnd_format_t = struct
+{
+    allocator: *const std.mem.Allocator,
+    wFormatTag: u16 = 0,
+    nChannels: u16 = 0,
+    nSamplesPerSec: u32 = 0,
+    nAvgBytesPerSec: u32 = 0,
+    nBlockAlign: u16 = 0,
+    wBitsPerSample: u16 = 0,
+    data: []u8 = &.{},
+
+    //*************************************************************************
+    fn create(allocator: *const std.mem.Allocator) !*rdpsnd_format_t
+    {
+        const self = try allocator.create(rdpsnd_format_t);
+        self.* = .{.allocator = allocator};
+        return self;
+    }
+
+    //*************************************************************************
+    fn create_from_format(allocator: *const std.mem.Allocator,
+            format: *c.format_t) !*rdpsnd_format_t
+    {
+        const self = try allocator.create(rdpsnd_format_t);
+        self.* = .{.allocator = allocator,
+                .wFormatTag = format.wFormatTag,
+                .nChannels = format.nChannels,
+                .nSamplesPerSec = format.nSamplesPerSec,
+                .nAvgBytesPerSec = format.nAvgBytesPerSec,
+                .nBlockAlign = format.nBlockAlign,
+                .wBitsPerSample = format.wBitsPerSample};
+        if (format.cbSize > 0)
+        {
+            if (format.data) |adata|
+            {
+                var lslice: []u8 = undefined;
+                lslice.ptr = @ptrCast(adata);
+                lslice.len = format.cbSize;
+                self.data = try self.allocator.alloc(u8, format.cbSize);
+                std.mem.copyForwards(u8, self.data, lslice);
+            }
+        }
+        return self;
+    }
+
+    //*************************************************************************
+    fn delete(self: *rdpsnd_format_t) void
+    {
+        self.allocator.free(self.data);
+        self.allocator.destroy(self);
+    }
+
+};
+
+const rdpsnd_formats_t = std.ArrayList(*rdpsnd_format_t);
+
 pub const rdp_session_t = struct
 {
     allocator: *const std.mem.Allocator,
@@ -98,18 +164,95 @@ pub const rdp_session_t = struct
     svc: *c.svc_channels_t,
     cliprdr: *c.cliprdr_t,
     rdpsnd: *c.rdpsnd_t,
+    formats: rdpsnd_formats_t,
     connected: bool = false,
     sck: i32 = -1,
     recv_start: usize = 0,
     in_data_slice: []u8 = &.{},
     send_head: ?*send_t = null,
     send_tail: ?*send_t = null,
+    audio_head: ?*audio_t = null,
+    audio_tail: ?*audio_t = null,
     rdp_x11: ?*rdpc_x11.rdp_x11_t = null,
     pulse: ?*rdpc_pulse.rdp_pulse_t = null,
 
     rfxdecoder: ?*anyopaque = null,
     ddata: []u8 = &.{},
     shm_info: shm_info_t = .{},
+
+    //*************************************************************************
+    pub fn create(allocator: *const std.mem.Allocator,
+            settings: *c.rdpc_settings_t,
+            rdp_connect: *rdp_connect_t) !*rdp_session_t
+    {
+        const self = try allocator.create(rdp_session_t);
+        errdefer allocator.destroy(self);
+        // setup rdpc
+        var rdpc = try create_rdpc(settings);
+        errdefer _ = c.rdpc_delete(rdpc);
+        rdpc.user = self;
+        rdpc.log_msg = cb_rdpc_log_msg;
+        rdpc.send_to_server = cb_rdpc_send_to_server;
+        rdpc.set_surface_bits = cb_rdpc_set_surface_bits;
+        rdpc.frame_marker = cb_rdpc_frame_marker;
+        rdpc.pointer_update = cb_rdpc_pointer_update;
+        rdpc.pointer_cached = cb_rdpc_pointer_cached;
+        rdpc.channel = cb_rdpc_channel;
+
+        // setup svc
+        var svc = try create_svc();
+        errdefer _ = c.svc_delete(svc);
+        svc.user = self;
+        svc.log_msg = cb_svc_log_msg;
+        svc.send_data = cb_svc_send_data;
+
+        // setup channels
+        const gcc_net = &rdpc.cgcc.net;
+
+        // setup cliprdr
+        var cliprdr = try create_cliprdr();
+        errdefer _ = c.cliprdr_delete(cliprdr);
+        cliprdr.user = self;
+        cliprdr.log_msg = cb_cliprdr_log_msg;
+        cliprdr.send_data = cb_cliprdr_send_data;
+        cliprdr.ready = cb_cliprdr_ready;
+        cliprdr.format_list = cb_cliprdr_format_list;
+        cliprdr.format_list_response = cb_cliprdr_format_list_response;
+        cliprdr.data_request = cb_cliprdr_data_request;
+        cliprdr.data_response = cb_cliprdr_data_response;
+        var chan_index = gcc_net.channelCount;
+        var chan = &gcc_net.channelDefArray[chan_index];
+        std.mem.copyForwards(u8, &chan.name, "CLIPRDR");
+        chan.options = 0;
+        svc.channels[chan_index].user = self;
+        svc.channels[chan_index].process_data = cb_svc_cliprdr_process_data;
+        gcc_net.channelCount += 1;
+
+        // setup rdpsnd
+        var rdpsnd = try create_rdpsnd();
+        errdefer _ = c.rdpsnd_delete(rdpsnd);
+        rdpsnd.user = self;
+        rdpsnd.log_msg = cb_rdpsnd_log_msg;
+        rdpsnd.send_data = cb_rdpsnd_send_data;
+        rdpsnd.process_close = cb_rdpsnd_process_close;
+        rdpsnd.process_wave = cb_rdpsnd_process_wave;
+        rdpsnd.process_training = cb_rdpsnd_process_training;
+        rdpsnd.process_formats = cb_rdpsnd_process_formats;
+        chan_index = gcc_net.channelCount;
+        chan = &gcc_net.channelDefArray[chan_index];
+        std.mem.copyForwards(u8, &chan.name, "RDPSND");
+        chan.options = 0;
+        svc.channels[chan_index].user = self;
+        svc.channels[chan_index].process_data = cb_svc_rdpsnd_process_data;
+        gcc_net.channelCount += 1;
+        const formats = rdpsnd_formats_t.init(allocator.*);
+
+        // init self
+        self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
+                .rdpc = rdpc, .svc = svc, .cliprdr = cliprdr, .rdpsnd = rdpsnd,
+                .formats = formats};
+        return self;
+    }
 
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
@@ -130,6 +273,11 @@ pub const rdp_session_t = struct
         {
             apulse.delete();
         }
+        for (self.formats.items) |ardpsnd_format|
+        {
+            ardpsnd_format.delete();
+        }
+        self.formats.deinit();
         self.allocator.destroy(self);
     }
 
@@ -562,7 +710,7 @@ pub const rdp_session_t = struct
             const height = self.rdpc.cgcc.core.desktopHeight;
             try self.logln(log.LogLevel.info, @src(), "width {} height {}",
                     .{width, height});
-            self.rdp_x11 = try rdpc_x11.create(self, self.allocator,
+            self.rdp_x11 = try rdpc_x11.rdp_x11_t.create(self, self.allocator,
                     width, height);
         }
         if (self.send_head) |asend_head|
@@ -644,6 +792,22 @@ pub const rdp_session_t = struct
                     }
                 }
             }
+            var pulse_index: ?usize = null;
+            if (self.pulse) |apulse|
+            {
+                if (self.audio_head != null)
+                {
+                    pulse_index = poll_count;
+                    polls[poll_count].fd = apulse.play_fifo[0];
+                    polls[poll_count].events = posix.POLL.IN;
+                    polls[poll_count].revents = 0;
+                    poll_count += 1;
+                    if (poll_count >= max_polls)
+                    {
+                        break;
+                    }
+                }
+            }
             const active_polls = polls[0..poll_count];
             const poll_rv = try posix.poll(active_polls, timeout);
             try self.logln_devel(log.LogLevel.debug, @src(),
@@ -669,6 +833,54 @@ pub const rdp_session_t = struct
                 {
                     try ardp_x11.check_fds();
                 }
+                if (pulse_index) |apulse_index|
+                {
+                    if ((active_polls[apulse_index].revents & posix.POLL.IN) != 0)
+                    {
+                        if (self.pulse) |apulse|
+                        {
+                            //try fifo_clear(&apulse.play_fifo);
+                            //try self.logln(log.LogLevel.info, @src(), "1", .{});
+                            if (self.audio_head) |aaudio_head|
+                            {
+                                const audio = aaudio_head;
+                                const slice = audio.slice[audio.played..];
+                                //try self.logln(log.LogLevel.info, @src(), "2 {}", .{slice.len});
+                                //try fifo_clear(&apulse.play_fifo);
+                                const played = apulse.play_non_blocking(slice) catch 0;
+                                //try self.logln(log.LogLevel.info, @src(), "3 {}", .{played});
+                                if (played > 0)
+                                {
+                                    audio.played += played;
+                                    if (audio.played >= audio.slice.len)
+                                    {
+                                        self.audio_head = audio.next;
+                                        if (self.audio_head == null)
+                                        {
+                                            // if audio_head is null, set audio_tail to null
+                                            self.audio_tail = null;
+                                        }
+                                        const mstime = apulse.get_latency() catch 0;
+                                        _ = c.rdpsnd_send_waveconfirm(self.rdpsnd, audio.channel_id,
+                                                @truncate(audio.time_stamp + mstime),
+                                                audio.block_no);
+                                        self.allocator.free(audio.slice);
+                                        self.allocator.destroy(audio);
+                                    }
+                                }
+                                else
+                                {
+                                    //try self.logln(log.LogLevel.info, @src(), "played zero", .{});
+                                    try fifo_clear(&apulse.play_fifo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                return SesError.Connect;
             }
         }
     }
@@ -753,15 +965,90 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn rdpsnd_process_close(self: *rdp_session_t, channel_id: u16) !c_int
+    {
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "channel_id 0x{X}", .{channel_id});
+        if (self.pulse) |apulse|
+        {
+            const close_rv = apulse.stop();
+            if (close_rv) |_|
+            {
+                try self.logln(log.LogLevel.info, @src(),
+                        "pulse.close ok", .{});
+            }
+            else |err|
+            {
+                try self.logln(log.LogLevel.info, @src(),
+                        "pulse.close err {}", .{err});
+            }
+        }
+        // free cached data
+        var audio = self.audio_head;
+        while (audio) |aaudio|
+        {
+            const audio_next = aaudio.next;
+            self.allocator.free(aaudio.slice);
+            self.allocator.destroy(aaudio);
+            audio = audio_next;
+        }
+        self.audio_head = null;
+        self.audio_tail = null;
+        return c.LIBCLIPRDR_ERROR_NONE;
+    }
+
+    //*************************************************************************
     fn rdpsnd_process_wave_slice(self: *rdp_session_t, channel_id: u16,
             time_stamp: u16, format_no: u16, block_no: u8, slice: []u8) !c_int
     {
-        try self.logln(log.LogLevel.info, @src(),
+        try self.logln_devel(log.LogLevel.info, @src(),
                 "channel_id 0x{X} time_stamp {} format_no {} " ++
                 "block_no {} slice.len {}",
                 .{channel_id, time_stamp, format_no, block_no, slice.len});
-        return c.rdpsnd_send_waveconfirm(self.rdpsnd, channel_id,
-                time_stamp, block_no);
+        //var mslatency: u16 = 0;
+        if (self.pulse) |apulse|
+        {
+            if (apulse.pa_stream == null)
+            {
+                if (format_no < self.formats.items.len)
+                {
+                    const rdpsnd_format = self.formats.items[format_no];
+                    const start_rv = apulse.start("name1", 250, rdpsnd_format);
+                    if (start_rv) |_|
+                    {
+                        try self.logln(log.LogLevel.info, @src(),
+                                "pulse.start ok", .{});
+                    }
+                    else |err|
+                    {
+                        try self.logln(log.LogLevel.info, @src(),
+                                "pulse.start err {}", .{err});
+                    }
+                }
+            }
+            if (apulse.pa_stream) |_|
+            {
+                const audio_slice = try self.allocator.alloc(u8, slice.len);
+                errdefer self.allocator.free(audio_slice);
+                const audio = try self.allocator.create(audio_t);
+                errdefer self.allocator.destroy(audio);
+                audio.* = .{.channel_id = channel_id,
+                        .time_stamp = time_stamp, .block_no = block_no,
+                        .slice = audio_slice};
+                std.mem.copyForwards(u8, audio.slice, slice);
+                if (self.audio_tail) |aaudio_tail|
+                {
+                    aaudio_tail.next = audio;
+                    self.audio_tail = audio;
+                }
+                else
+                {
+                    self.audio_head = audio;
+                    self.audio_tail = audio;
+                }
+            }
+        }
+        return c.LIBRDPSND_ERROR_NONE;
     }
 
     //*************************************************************************
@@ -784,16 +1071,16 @@ pub const rdp_session_t = struct
             num_formats: u16, formats: [*]c.format_t) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
-            "channel_id 0x{X} flags {} volume {} pitch {} dgram_port {} " ++
-            "version {} block_no {} num_formats {}",
-            .{channel_id, flags, volume, pitch, dgram_port, version,
-            block_no, num_formats});
+                "channel_id 0x{X} flags {} volume {} pitch {} " ++
+                "dgram_port {} version {} block_no {} num_formats {}",
+                .{channel_id, flags, volume, pitch, dgram_port, version,
+                block_no, num_formats});
         var sformats = std.ArrayList(c.format_t).init(self.allocator.*);
         defer sformats.deinit();
-
         if (self.pulse == null)
         {
-            const pulse = rdpc_pulse.create(self, self.allocator, "xclient");
+            const pulse = rdpc_pulse.rdp_pulse_t.create(self,
+                    self.allocator, "xclient");
             if (pulse) |apulse|
             {
                 try self.logln(log.LogLevel.info, @src(),
@@ -804,38 +1091,33 @@ pub const rdp_session_t = struct
             {
                 try self.logln(log.LogLevel.info, @src(),
                         "rdpc_pulse.create err {}", .{err});
-                return err;
             }
         }
-
-        // if (self.pulse) |apulse|
-        // {
-        //     const start_rv = apulse.start("name1", 0, 0);
-        //     if (start_rv) |_|
-        //     {
-        //         try self.logln(log.LogLevel.info, @src(),
-        //                 "pulse.start ok", .{});
-        //     }
-        //     else |err|
-        //     {
-        //         try self.logln(log.LogLevel.info, @src(),
-        //                 "pulse.start err {}", .{err});
-        //         return err;
-        //     }
-        // }
-
+        // clear formats
+        for (self.formats.items) |ardpsnd_format|
+        {
+            ardpsnd_format.delete();
+        }
+        self.formats.clearRetainingCapacity();
         if (self.pulse) |apulse|
         {
             for (0..num_formats) |index|
             {
                 const format = &formats[index];
-                const format_ok = try apulse.check_format(format.wFormatTag,
-                        format.nChannels, format.nSamplesPerSec,
-                        format.nAvgBytesPerSec, format.nBlockAlign,
-                        format.wBitsPerSample);
+                const rdpsnd_format = try rdpsnd_format_t.create_from_format(
+                        self.allocator, format);
+                errdefer rdpsnd_format.delete();
+                const format_ok = try apulse.check_format(rdpsnd_format);
                 if (format_ok)
                 {
                     try sformats.append(format.*);
+                    // make a copy
+                    const aformat = try self.formats.addOne();
+                    aformat.* = rdpsnd_format;
+                }
+                else
+                {
+                    rdpsnd_format.delete();
                 }
             }
         }
@@ -907,77 +1189,6 @@ fn create_rdpsnd() !*c.rdpsnd_t
 }
 
 //*****************************************************************************
-pub fn create(allocator: *const std.mem.Allocator,
-        settings: *c.rdpc_settings_t,
-        rdp_connect: *rdp_connect_t) !*rdp_session_t
-{
-    const self = try allocator.create(rdp_session_t);
-    errdefer allocator.destroy(self);
-    // setup rdpc
-    var rdpc = try create_rdpc(settings);
-    errdefer _ = c.rdpc_delete(rdpc);
-    rdpc.user = self;
-    rdpc.log_msg = cb_rdpc_log_msg;
-    rdpc.send_to_server = cb_rdpc_send_to_server;
-    rdpc.set_surface_bits = cb_rdpc_set_surface_bits;
-    rdpc.frame_marker = cb_rdpc_frame_marker;
-    rdpc.pointer_update = cb_rdpc_pointer_update;
-    rdpc.pointer_cached = cb_rdpc_pointer_cached;
-    rdpc.channel = cb_rdpc_channel;
-
-    // setup svc
-    var svc = try create_svc();
-    errdefer _ = c.svc_delete(svc);
-    svc.user = self;
-    svc.log_msg = cb_svc_log_msg;
-    svc.send_data = cb_svc_send_data;
-
-    // setup channels
-    const gcc_net = &rdpc.cgcc.net;
-
-    // setup cliprdr
-    var cliprdr = try create_cliprdr();
-    errdefer _ = c.cliprdr_delete(cliprdr);
-    cliprdr.user = self;
-    cliprdr.log_msg = cb_cliprdr_log_msg;
-    cliprdr.send_data = cb_cliprdr_send_data;
-    cliprdr.ready = cb_cliprdr_ready;
-    cliprdr.format_list = cb_cliprdr_format_list;
-    cliprdr.format_list_response = cb_cliprdr_format_list_response;
-    cliprdr.data_request = cb_cliprdr_data_request;
-    cliprdr.data_response = cb_cliprdr_data_response;
-    var chan_index = gcc_net.channelCount;
-    var chan = &gcc_net.channelDefArray[chan_index];
-    std.mem.copyForwards(u8, &chan.name, "CLIPRDR");
-    chan.options = 0;
-    svc.channels[chan_index].user = self;
-    svc.channels[chan_index].process_data = cb_svc_cliprdr_process_data;
-    gcc_net.channelCount += 1;
-
-    // setup rdpsnd
-    var rdpsnd = try create_rdpsnd();
-    errdefer _ = c.rdpsnd_delete(rdpsnd);
-    rdpsnd.user = self;
-    rdpsnd.log_msg = cb_rdpsnd_log_msg;
-    rdpsnd.send_data = cb_rdpsnd_send_data;
-    rdpsnd.process_wave = cb_rdpsnd_process_wave;
-    rdpsnd.process_training = cb_rdpsnd_process_training;
-    rdpsnd.process_formats = cb_rdpsnd_process_formats;
-    chan_index = gcc_net.channelCount;
-    chan = &gcc_net.channelDefArray[chan_index];
-    std.mem.copyForwards(u8, &chan.name, "RDPSND");
-    chan.options = 0;
-    svc.channels[chan_index].user = self;
-    svc.channels[chan_index].process_data = cb_svc_rdpsnd_process_data;
-    gcc_net.channelCount += 1;
-
-    // init self
-    self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
-            .rdpc = rdpc, .svc = svc, .cliprdr = cliprdr, .rdpsnd = rdpsnd};
-    return self;
-}
-
-//*****************************************************************************
 pub fn init() !void
 {
     try err_if(c.rdpc_init() != c.LIBRDPC_ERROR_NONE, SesError.RdpcInit);
@@ -1006,6 +1217,8 @@ fn shm_info_init(size: usize, shm_info: *shm_info_t) !void
     if (shm_info.ptr == err_ptr) return error.shmat;
     errdefer _ = c.shmdt(shm_info.ptr);
     shm_info.bytes = @truncate(size);
+    // call IPC_RMID now in case app crash
+    _ = c.shmctl(shm_info.shmid, c.IPC_RMID, null);
 }
 
 //*****************************************************************************
@@ -1018,10 +1231,49 @@ fn shm_info_deinit(shm_info: *shm_info_t) void
     }
     if (shm_info.shmid != -1)
     {
-        _ = c.shmctl(shm_info.shmid, c.IPC_RMID, null);
+        // IPC_RMID called in shm_info_init
         shm_info.shmid = -1;
     }
     shm_info.bytes = 0;
+}
+
+//*****************************************************************************
+pub fn fifo_is_set(fifo: *[2]i32) !bool
+{
+    var polls: [1]posix.pollfd = undefined;
+    polls[0].fd = fifo[0];
+    polls[0].events = posix.POLL.IN;
+    polls[0].revents = 0;
+    const active_polls = polls[0..1];
+    if (try posix.poll(active_polls, 0) > 0)
+    {
+        if ((active_polls[0].revents & posix.POLL.IN) != 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+//*****************************************************************************
+pub fn fifo_set(fifo: *[2]i32) !void
+{
+    if (try fifo_is_set(fifo))
+    {
+        return;
+    }
+    var buf: [4]u8 = .{'i', 'n', 't', 0};
+    _ = try posix.write(fifo[1], &buf);
+}
+
+//*****************************************************************************
+pub fn fifo_clear(fifo: *[2]i32) !void
+{
+    while (try fifo_is_set(fifo))
+    {
+        var buf: [4]u8 = undefined;
+        _ = try posix.read(fifo[0], &buf);
+    }
 }
 
 //*****************************************************************************
@@ -1474,6 +1726,25 @@ fn cb_rdpsnd_send_data(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
         }
     }
     return c.LIBRDPSND_ERROR_SEND_DATA;
+}
+
+//*****************************************************************************
+// callback
+// int (*process_close)(struct rdpsnd_t* rdpsnd, uint16_t channel_id);
+fn cb_rdpsnd_process_close(rdpsnd: ?*c.rdpsnd_t,
+        channel_id: u16) callconv(.C) c_int
+{
+    if (rdpsnd) |ardpsnd|
+    {
+        const session: ?*rdp_session_t =
+                @alignCast(@ptrCast(ardpsnd.user));
+        if (session) |asession|
+        {
+            return asession.rdpsnd_process_close(channel_id) catch
+                    c.LIBRDPSND_ERROR_PROCESS_CLOSE;
+        }
+    }
+    return c.LIBRDPSND_ERROR_PROCESS_CLOSE;
 }
 
 //*****************************************************************************

@@ -272,14 +272,14 @@ fn create_rdpc_session(rdp_connect: *rdpc_session.rdp_connect_t)
         }
         return err;
     }
-    return try rdpc_session.create(&g_allocator, settings, rdp_connect);
+    return try rdpc_session.rdp_session_t.create(&g_allocator,
+            settings, rdp_connect);
 }
 
 //*****************************************************************************
 fn term_sig(_: c_int) callconv(.C) void
 {
-    const msg: [4]u8 = .{ 'i', 'n', 't', 0 };
-    _ = posix.write(rdpc_session.g_term[1], msg[0..4]) catch return;
+    rdpc_session.fifo_set(&rdpc_session.g_term) catch return;
 }
 
 //*****************************************************************************
