@@ -269,6 +269,8 @@ pub const rdp_session_t = struct
         {
             posix.close(self.sck);
         }
+        // free cached audio data
+        self.cleanup_audio();
         if (self.pulse) |apulse|
         {
             apulse.delete();
@@ -749,13 +751,11 @@ pub const rdp_session_t = struct
             {
                 const audio = aaudio_head;
                 const slice = audio.slice[audio.played..];
-                try fifo_clear(&apulse.play_fifo);
                 const played = apulse.play_non_blocking(slice) catch 0;
                 try self.logln_devel(log.LogLevel.info, @src(),
                         "bytes played {}", .{played});
                 if (played > 0)
                 {
-                    try fifo_set(&apulse.play_fifo);
                     audio.played += played;
                     if (audio.played >= audio.slice.len)
                     {
@@ -972,6 +972,21 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn cleanup_audio(self: *rdp_session_t) void
+    {
+        var audio = self.audio_head;
+        while (audio) |aaudio|
+        {
+            const audio_next = aaudio.next;
+            self.allocator.free(aaudio.slice);
+            self.allocator.destroy(aaudio);
+            audio = audio_next;
+        }
+        self.audio_head = null;
+        self.audio_tail = null;
+    }
+
+    //*************************************************************************
     fn rdpsnd_process_close(self: *rdp_session_t, channel_id: u16) !c_int
     {
         try self.logln_devel(log.LogLevel.info, @src(),
@@ -990,17 +1005,8 @@ pub const rdp_session_t = struct
                         "pulse.close err {}", .{err});
             }
         }
-        // free cached data
-        var audio = self.audio_head;
-        while (audio) |aaudio|
-        {
-            const audio_next = aaudio.next;
-            self.allocator.free(aaudio.slice);
-            self.allocator.destroy(aaudio);
-            audio = audio_next;
-        }
-        self.audio_head = null;
-        self.audio_tail = null;
+        // free cached audio data
+        self.cleanup_audio();
         return c.LIBCLIPRDR_ERROR_NONE;
     }
 
@@ -1012,7 +1018,6 @@ pub const rdp_session_t = struct
                 "channel_id 0x{X} time_stamp {} format_no {} " ++
                 "block_no {} slice.len {}",
                 .{channel_id, time_stamp, format_no, block_no, slice.len});
-        //var mslatency: u16 = 0;
         if (self.pulse) |apulse|
         {
             if (apulse.pa_stream == null)

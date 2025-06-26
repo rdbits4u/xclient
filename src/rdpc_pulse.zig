@@ -78,6 +78,11 @@ pub const rdp_pulse_t = struct
     //*************************************************************************
     pub fn delete(self: *rdp_pulse_t) void
     {
+        if (self.pa_stream != null)
+        {
+            _ = c.pa_stream_disconnect(self.pa_stream);
+            c.pa_stream_unref(self.pa_stream);
+        }
         posix.close(self.play_fifo[0]);
         posix.close(self.play_fifo[1]);
         c.pa_threaded_mainloop_stop(self.pa_mainloop);
@@ -97,10 +102,6 @@ pub const rdp_pulse_t = struct
                 .{format.wFormatTag, format.nChannels, format.nSamplesPerSec,
                 format.nAvgBytesPerSec, format.nBlockAlign,
                 format.wBitsPerSample});
-        // if (format.nSamplesPerSec == 44100)
-        // {
-        //     return false;
-        // }
         if (format.wFormatTag != 1) // PCM data
         {
             return false;
@@ -242,6 +243,7 @@ pub const rdp_pulse_t = struct
         }
         c.pa_threaded_mainloop_lock(self.pa_mainloop);
         defer c.pa_threaded_mainloop_unlock(self.pa_mainloop);
+        try rdpc_session.fifo_clear(&self.play_fifo);
         var bytes_played: usize = 0;
         const lslice = slice;
         if (lslice.len > 0)
@@ -264,6 +266,7 @@ pub const rdp_pulse_t = struct
             }
             bytes_played += len;
         }
+        try rdpc_session.fifo_set(&self.play_fifo);
         return bytes_played;
     }
 
@@ -403,12 +406,14 @@ fn cb_pa_stream_request(stream: ?*c.pa_stream, length: usize,
         userdata: ?*anyopaque) callconv(.C) void
 {
     _ = stream;
-    _ = length;
     //std.debug.print("cb_pa_stream_request: length {}\n", .{length});
     const pulse: ?*rdp_pulse_t = @alignCast(@ptrCast(userdata));
     if (pulse) |apulse|
     {
         c.pa_threaded_mainloop_signal(apulse.pa_mainloop, 0);
-        rdpc_session.fifo_set(&apulse.play_fifo) catch return;
+        if (length > 0)
+        {
+            rdpc_session.fifo_set(&apulse.play_fifo) catch return;
+        }
     }
 }
