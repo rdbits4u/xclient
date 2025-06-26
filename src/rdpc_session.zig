@@ -755,6 +755,7 @@ pub const rdp_session_t = struct
                         "bytes played {}", .{played});
                 if (played > 0)
                 {
+                    try fifo_set(&apulse.play_fifo);
                     audio.played += played;
                     if (audio.played >= audio.slice.len)
                     {
@@ -765,7 +766,8 @@ pub const rdp_session_t = struct
                             self.audio_tail = null;
                         }
                         const mstime = apulse.get_latency() catch 0;
-                        _ = c.rdpsnd_send_waveconfirm(self.rdpsnd, audio.channel_id,
+                        _ = c.rdpsnd_send_waveconfirm(self.rdpsnd,
+                                audio.channel_id,
                                 @truncate(audio.time_stamp + mstime),
                                 audio.block_no);
                         self.allocator.free(audio.slice);
@@ -1018,7 +1020,8 @@ pub const rdp_session_t = struct
                 if (format_no < self.formats.items.len)
                 {
                     const rdpsnd_format = self.formats.items[format_no];
-                    const start_rv = apulse.start("name1", 250, rdpsnd_format);
+                    const start_rv = apulse.start("xclient1", 250,
+                            rdpsnd_format);
                     if (start_rv) |_|
                     {
                         try self.logln(log.LogLevel.info, @src(),
