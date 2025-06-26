@@ -741,6 +741,48 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn process_write_pulse_data(self: *rdp_session_t) !void
+    {
+        if (self.pulse) |apulse|
+        {
+            while (self.audio_head) |aaudio_head|
+            {
+                const audio = aaudio_head;
+                const slice = audio.slice[audio.played..];
+                try fifo_clear(&apulse.play_fifo);
+                const played = apulse.play_non_blocking(slice) catch 0;
+                try self.logln_devel(log.LogLevel.info, @src(),
+                        "bytes played {}", .{played});
+                if (played > 0)
+                {
+                    audio.played += played;
+                    if (audio.played >= audio.slice.len)
+                    {
+                        self.audio_head = audio.next;
+                        if (self.audio_head == null)
+                        {
+                            // if audio_head is null, set audio_tail to null
+                            self.audio_tail = null;
+                        }
+                        const mstime = apulse.get_latency() catch 0;
+                        _ = c.rdpsnd_send_waveconfirm(self.rdpsnd, audio.channel_id,
+                                @truncate(audio.time_stamp + mstime),
+                                audio.block_no);
+                        self.allocator.free(audio.slice);
+                        self.allocator.destroy(audio);
+                    }
+                }
+                else
+                {
+                    try self.logln_devel(log.LogLevel.info, @src(),
+                            "played zero", .{});
+                    break;
+                }
+            }
+        }
+    }
+
+    //*************************************************************************
     pub fn loop(self: *rdp_session_t) !void
     {
         self.in_data_slice = try self.allocator.alloc(u8, 128 * 1024);
@@ -837,44 +879,7 @@ pub const rdp_session_t = struct
                 {
                     if ((active_polls[apulse_index].revents & posix.POLL.IN) != 0)
                     {
-                        if (self.pulse) |apulse|
-                        {
-                            //try fifo_clear(&apulse.play_fifo);
-                            //try self.logln(log.LogLevel.info, @src(), "1", .{});
-                            if (self.audio_head) |aaudio_head|
-                            {
-                                const audio = aaudio_head;
-                                const slice = audio.slice[audio.played..];
-                                //try self.logln(log.LogLevel.info, @src(), "2 {}", .{slice.len});
-                                //try fifo_clear(&apulse.play_fifo);
-                                const played = apulse.play_non_blocking(slice) catch 0;
-                                //try self.logln(log.LogLevel.info, @src(), "3 {}", .{played});
-                                if (played > 0)
-                                {
-                                    audio.played += played;
-                                    if (audio.played >= audio.slice.len)
-                                    {
-                                        self.audio_head = audio.next;
-                                        if (self.audio_head == null)
-                                        {
-                                            // if audio_head is null, set audio_tail to null
-                                            self.audio_tail = null;
-                                        }
-                                        const mstime = apulse.get_latency() catch 0;
-                                        _ = c.rdpsnd_send_waveconfirm(self.rdpsnd, audio.channel_id,
-                                                @truncate(audio.time_stamp + mstime),
-                                                audio.block_no);
-                                        self.allocator.free(audio.slice);
-                                        self.allocator.destroy(audio);
-                                    }
-                                }
-                                else
-                                {
-                                    //try self.logln(log.LogLevel.info, @src(), "played zero", .{});
-                                    try fifo_clear(&apulse.play_fifo);
-                                }
-                            }
-                        }
+                        try self.process_write_pulse_data();
                     }
                 }
             }

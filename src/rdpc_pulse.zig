@@ -59,9 +59,13 @@ pub const rdp_pulse_t = struct
         defer c.pa_threaded_mainloop_unlock(pa_mainloop);
         rv = c.pa_threaded_mainloop_start(pa_mainloop);
         try err_if(rv < 0, PulseError.PaStart);
-        var state: c.pa_context_state_t = c.PA_CONTEXT_UNCONNECTED;
-        while (!get_state_is_ready(pa_context, &state))
+        while (true)
         {
+            const state = c.pa_context_get_state(pa_context);
+            if (state == c.PA_CONTEXT_READY)
+            {
+                break;
+            }
             try err_if(c.PA_CONTEXT_IS_GOOD(state) == 0, PulseError.PaStart);
             c.pa_threaded_mainloop_wait(pa_mainloop);
         }
@@ -97,7 +101,7 @@ pub const rdp_pulse_t = struct
         // {
         //     return false;
         // }
-        if (format.wFormatTag != 1)
+        if (format.wFormatTag != 1) // PCM data
         {
             return false;
         }
@@ -119,31 +123,41 @@ pub const rdp_pulse_t = struct
         sample_spec_from_format(&sample_spec, format);
         self.channels = format.nChannels;
 
-        try err_if(c.pa_sample_spec_valid(&sample_spec) == 0, PulseError.PaValid);
+        try err_if(c.pa_sample_spec_valid(&sample_spec) == 0,
+                PulseError.PaValid);
         c.pa_threaded_mainloop_lock(self.pa_mainloop);
         defer c.pa_threaded_mainloop_unlock(self.pa_mainloop);
 
-        self.pa_stream = c.pa_stream_new(self.pa_context, name, &sample_spec, channel_map_p);
+        self.pa_stream = c.pa_stream_new(self.pa_context, name, &sample_spec,
+                channel_map_p);
         try err_if (self.pa_stream == null, PulseError.PaStream);
 
         // install essential callbacks
-        c.pa_stream_set_state_callback(self.pa_stream, cb_pa_stream_state, self.pa_mainloop);
-        c.pa_stream_set_write_callback(self.pa_stream, cb_pa_stream_request, self);
+        c.pa_stream_set_state_callback(self.pa_stream, cb_pa_stream_state,
+                self.pa_mainloop);
+        c.pa_stream_set_write_callback(self.pa_stream, cb_pa_stream_request,
+                self);
 
-        var flags: c_uint = c.PA_STREAM_INTERPOLATE_TIMING | c.PA_STREAM_AUTO_TIMING_UPDATE;
+        var flags: c_uint = c.PA_STREAM_INTERPOLATE_TIMING |
+                c.PA_STREAM_AUTO_TIMING_UPDATE;
         var buffer_attr: c.pa_buffer_attr = .{};
         var pbuffer_attr: ?*c.pa_buffer_attr = null;
         if (ms_latency > 0)
         {
             pbuffer_attr = &buffer_attr;
-            buffer_attr.maxlength = @truncate(c.pa_usec_to_bytes(ms_latency * sample_spec.channels * 1000, &sample_spec));
-            buffer_attr.tlength = @truncate(c.pa_usec_to_bytes(ms_latency * 1000, &sample_spec));
+            const usecs = ms_latency * 1000;
+            const ml = c.pa_usec_to_bytes(usecs * sample_spec.channels,
+                    &sample_spec);
+            buffer_attr.maxlength = @truncate(ml);
+            const tl = c.pa_usec_to_bytes(usecs, &sample_spec);
+            buffer_attr.tlength = @truncate(tl);
             buffer_attr.prebuf = std.math.maxInt(u32);
             buffer_attr.minreq = std.math.maxInt(u32);
             buffer_attr.fragsize = std.math.maxInt(u32);
             flags |= c.PA_STREAM_ADJUST_LATENCY;
         }
-        const rv = c.pa_stream_connect_playback(self.pa_stream, 0, pbuffer_attr, flags, 0, null);
+        const rv = c.pa_stream_connect_playback(self.pa_stream, 0,
+                pbuffer_attr, flags, 0, null);
         try err_if(rv < 0, PulseError.PaStream);
         while (true)
         {
@@ -333,15 +347,6 @@ fn create_pa_context(pa_mainloop: *c.pa_threaded_mainloop,
         return apa_context;
     }
     return PulseError.PaContext;
-}
-
-//*****************************************************************************
-fn get_state_is_ready(pa_context: *c.pa_context,
-        state: *c.pa_context_state_t) bool
-{
-    const lstate = c.pa_context_get_state(pa_context);
-    state.* = lstate;
-    return lstate == c.PA_CONTEXT_READY;
 }
 
 //*****************************************************************************
