@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void
     xclient.linkSystemLibrary("x11");
     xclient.linkSystemLibrary("xext");
     xclient.linkSystemLibrary("xcursor");
+    xclient.linkSystemLibrary("xfixes");
     xclient.linkSystemLibrary("pixman-1");
     xclient.linkSystemLibrary("libpulse");
     xclient.addObjectFile(b.path("../librfxcodec/src/.libs/librfxdecode.a"));

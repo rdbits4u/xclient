@@ -37,6 +37,7 @@ pub const rdp_pulse_t = struct
     channels: u32 = 0,
     pad: i32 = 0,
     play_fifo: [2]i32 = .{-1, -1},
+    sample_spec: c.pa_sample_spec = .{},
 
     //*************************************************************************
     pub fn create(session: *rdpc_session.rdp_session_t,
@@ -120,16 +121,16 @@ pub const rdp_pulse_t = struct
 
         const channel_map_p: ?*c.pa_channel_map = null;
 
-        var sample_spec: c.pa_sample_spec = .{};
-        sample_spec_from_format(&sample_spec, format);
+        self.sample_spec = .{};
+        sample_spec_from_format(&self.sample_spec, format);
         self.channels = format.nChannels;
 
-        try err_if(c.pa_sample_spec_valid(&sample_spec) == 0,
+        try err_if(c.pa_sample_spec_valid(&self.sample_spec) == 0,
                 PulseError.PaValid);
         c.pa_threaded_mainloop_lock(self.pa_mainloop);
         defer c.pa_threaded_mainloop_unlock(self.pa_mainloop);
 
-        self.pa_stream = c.pa_stream_new(self.pa_context, name, &sample_spec,
+        self.pa_stream = c.pa_stream_new(self.pa_context, name, &self.sample_spec,
                 channel_map_p);
         try err_if (self.pa_stream == null, PulseError.PaStream);
 
@@ -147,10 +148,10 @@ pub const rdp_pulse_t = struct
         {
             pbuffer_attr = &buffer_attr;
             const usecs = ms_latency * 1000;
-            const ml = c.pa_usec_to_bytes(usecs * sample_spec.channels,
-                    &sample_spec);
+            const ml = c.pa_usec_to_bytes(usecs * self.sample_spec.channels,
+                    &self.sample_spec);
             buffer_attr.maxlength = @truncate(ml);
-            const tl = c.pa_usec_to_bytes(usecs, &sample_spec);
+            const tl = c.pa_usec_to_bytes(usecs, &self.sample_spec);
             buffer_attr.tlength = @truncate(tl);
             buffer_attr.prebuf = std.math.maxInt(u32);
             buffer_attr.minreq = std.math.maxInt(u32);
@@ -271,7 +272,7 @@ pub const rdp_pulse_t = struct
     }
 
     //*************************************************************************
-    pub fn get_latency(self: *rdp_pulse_t) !usize
+    pub fn get_latency(self: *rdp_pulse_t, bytes: usize) !usize
     {
         try self.session.logln_devel(log.LogLevel.info, @src(), "", .{});
         if (self.pa_stream == null)
@@ -283,7 +284,8 @@ pub const rdp_pulse_t = struct
         var usec: c.pa_usec_t = undefined;
         var neg: c_int = undefined;
         const rv = c.pa_stream_get_latency(self.pa_stream, &usec, &neg);
-        return if ((rv == 0) and (neg == 0)) usec / 1000 else 0;
+        const usec1 = c.pa_bytes_to_usec(bytes, &self.sample_spec);
+        return if ((rv == 0) and (neg == 0)) (usec + usec1) / 1000 else 0;
     }
 
     //*************************************************************************

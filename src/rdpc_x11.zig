@@ -3,12 +3,13 @@ const builtin = @import("builtin");
 const strings = @import("strings");
 const log = @import("log");
 const rdpc_session = @import("rdpc_session.zig");
+const rdpc_x11_clip = @import("rdpc_x11_clip.zig");
 const net = std.net;
 const posix = std.posix;
 
 const c = rdpc_session.c;
 
-const X11Error = error
+pub const X11Error = error
 {
     GetFds,
     BadPointerCacheIndex,
@@ -34,6 +35,7 @@ pub const rdp_x11_t = struct
     session: *rdpc_session.rdp_session_t,
     allocator: *const std.mem.Allocator,
     display: *c.Display,
+    rdp_x11_clip: *rdpc_x11_clip.rdp_x11_clip_t,
     fd: c_int = 0,
     screen_number: c_int = 0,
     white: c_ulong = 0,
@@ -47,13 +49,26 @@ pub const rdp_x11_t = struct
     width: c_uint = 0,
     height: c_uint = 0,
     gc: c.GC = undefined,
-    net_wm_pid: c.Atom = 0,
-    wm_protocols: c.Atom = 0,
-    wm_delete_window: c.Atom = 0,
+    net_wm_pid_atom: c.Atom = c.None,
+    wm_protocols_atom: c.Atom = c.None,
+    wm_delete_window_atom: c.Atom = c.None,
+    clipboard_atom: c.Atom = c.None,
+    timestamp_atom: c.Atom = c.None,
+    targets_atom: c.Atom = c.None,
+    multiple_atom: c.Atom = c.None,
+    primary_atom: c.Atom = c.None,
+    secondary_atom: c.Atom = c.None,
+    utf8_atom: c.Atom = c.None,
+    incr_atom: c.Atom = c.None,
+    clip_property_atom: c.Atom = c.None,
+    get_time_atom: c.Atom = c.None,
     got_xshm: bool = false,
+    got_xfixes: bool = false,
     pointer_cache: []c_ulong = &.{},
     keymap: [256]rdp_key_code_t = undefined,
     need_keyboard_sync: bool = false,
+    xfixes_event_base: i32 = 0,
+    xfixes_error_base: i32 = 0,
 
     //*************************************************************************
     pub fn create(session: *rdpc_session.rdp_session_t,
@@ -65,7 +80,10 @@ pub const rdp_x11_t = struct
         const dis = c.XOpenDisplay(null);
         const display = if (dis) |adis| adis else return X11Error.BadOpenDisplay;
         errdefer _ = c.XCloseDisplay(display);
-        self.* = .{.session = session, .allocator = allocator, .display = display};
+        const rdp_x11_clip = try rdpc_x11_clip.rdp_x11_clip_t.create(allocator,
+                session, self);
+        self.* = .{.session = session, .allocator = allocator,
+                .display = display, .rdp_x11_clip = rdp_x11_clip};
         try self.session.logln(log.LogLevel.debug, @src(),
                 "rdp_x11_t width {} height {}", .{width, height});
         self.width = width;
@@ -78,6 +96,21 @@ pub const rdp_x11_t = struct
         self.depth = @bitCast(c.DefaultDepth(self.display, self.screen));
         self.visual = c.DefaultVisual(self.display, self.screen);
         self.root_window = c.DefaultRootWindow(self.display);
+        self.net_wm_pid_atom = c.XInternAtom(self.display, "_NET_WM_PID", c.False);
+        self.wm_protocols_atom = c.XInternAtom(self.display, "WM_PROTOCOLS", c.False);
+        self.wm_delete_window_atom = c.XInternAtom(self.display, "WM_DELETE_WINDOW", c.False);
+        self.clipboard_atom = c.XInternAtom(self.display, "CLIPBOARD", c.False);
+        self.timestamp_atom = c.XInternAtom(self.display, "TIMESTAMP", c.False);
+        self.targets_atom = c.XInternAtom(self.display, "TARGETS", c.False);
+        self.multiple_atom = c.XInternAtom(self.display, "MULTIPLE", c.False);
+        self.primary_atom = c.XInternAtom(self.display, "PRIMARY", c.False);
+        self.secondary_atom = c.XInternAtom(self.display, "SECONDARY", c.False);
+        self.utf8_atom = c.XInternAtom(self.display, "UTF8_STRING", c.False);
+        self.incr_atom = c.XInternAtom(self.display, "INCR", c.False);
+
+        self.clip_property_atom = c.XInternAtom(self.display, "RDPC_CLIP_PROPERTY_ATOM", c.False);
+        self.get_time_atom = c.XInternAtom(self.display, "RDPC_GET_TIME_ATOM", c.False);
+
         // create window
         try self.create_window();
         // window event mask
@@ -85,7 +118,7 @@ pub const rdp_x11_t = struct
                 c.VisibilityChangeMask | c.ButtonPressMask |
                 c.ButtonReleaseMask | c.KeyPressMask | c.KeyReleaseMask |
                 c.ExposureMask | c.PointerMotionMask | c.ExposureMask |
-                c.FocusChangeMask;
+                c.FocusChangeMask | c.PropertyChangeMask;
         _ = c.XSelectInput(self.display, self.window, event_mask);
         _ = c.XMapWindow(self.display, self.window);
         // create gc
@@ -98,6 +131,19 @@ pub const rdp_x11_t = struct
         self.got_xshm = c.XShmQueryExtension(self.display) != 0;
         try self.session.logln(log.LogLevel.debug, @src(),
                 "got_xshm {}", .{self.got_xshm});
+        self.got_xfixes = c.XFixesQueryExtension(self.display,
+                &self.xfixes_event_base, &self.xfixes_error_base) != 0;
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "got_xfixes {}", .{self.got_xfixes});
+        c.XFixesSelectSelectionInput(self.display, self.window,
+                self.clipboard_atom, c.XFixesSetSelectionOwnerNotifyMask |
+                c.XFixesSelectionWindowDestroyNotifyMask |
+                c.XFixesSelectionClientCloseNotifyMask);
+        // used to get server time
+        const no_text: [4]u8 = .{0, 0, 0, 0};
+        _ = c.XChangeProperty(self.display, self.window, self.get_time_atom,
+                    c.XA_STRING, 8, c.PropModeAppend, &no_text, 0);
+
         // flush to send all requests to xserver
         _ = c.XFlush(self.display);
 
@@ -220,6 +266,7 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     pub fn delete(self: *rdp_x11_t) void
     {
+        self.rdp_x11_clip.delete();
         for (self.pointer_cache) |cur|
         {
             if (cur != c.None)
@@ -497,11 +544,12 @@ pub const rdp_x11_t = struct
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
         if (self.window == event.window)
         {
-            if (event.message_type == self.wm_protocols)
+            if (event.message_type == self.wm_protocols_atom)
             {
-                if (event.data.l[0] == self.wm_delete_window)
+                if (event.data.l[0] == self.wm_delete_window_atom)
                 {
-                    try self.session.logln(log.LogLevel.debug, @src(), "closing window", .{});
+                    try self.session.logln(log.LogLevel.debug, @src(),
+                            "closing window", .{});
                     _ = c.XDestroyWindow(self.display, self.window);
                 }
             }
@@ -511,7 +559,8 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     fn handle_other(self: *rdp_x11_t, event: *c.XEvent) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "event {}", .{event.type});
+        try self.session.logln_devel(log.LogLevel.debug, @src(),
+                "rdpc_x11 event {}", .{event.type});
     }
 
     //*************************************************************************
@@ -539,8 +588,9 @@ pub const rdp_x11_t = struct
                 c.MapNotify => try self.handle_map(&event.xmap),
                 c.ConfigureNotify => try self.handle_configure(&event.xconfigure),
                 c.ClientMessage => try self.handle_client_message(&event.xclient),
-                else => try handle_other(self, &event),
+                else => try self.handle_other(&event),
             }
+            try self.rdp_x11_clip.handle_clip_message(&event);
         }
     }
 
@@ -594,15 +644,12 @@ pub const rdp_x11_t = struct
         class_hints.res_class = &res_class;
         _ = c.XSetClassHint(self.display, self.window, &class_hints);
         // setup _NET_WM_PID for window manager
-        self.net_wm_pid = c.XInternAtom(self.display, "_NET_WM_PID", 0);
         const pid: c_long = std.os.linux.getpid();
-        _ = c.XChangeProperty(self.display, self.window, self.net_wm_pid,
+        _ = c.XChangeProperty(self.display, self.window, self.net_wm_pid_atom,
                 c.XA_CARDINAL, 32, c.PropModeReplace,
                 std.mem.asBytes(&pid), 1);
         // setup WM_PROTOCOLS for window manager
-        self.wm_protocols = c.XInternAtom(self.display, "WM_PROTOCOLS", 0);
-        self.wm_delete_window = c.XInternAtom(self.display, "WM_DELETE_WINDOW", 0);
-        _ = c.XSetWMProtocols(self.display, self.window, &self.wm_delete_window, 1);
+        _ = c.XSetWMProtocols(self.display, self.window, &self.wm_delete_window_atom, 1);
     }
 
     //*************************************************************************
@@ -908,59 +955,6 @@ pub const rdp_x11_t = struct
                 X11Error.BadPointerCacheIndex);
         _ = c.XDefineCursor(self.display, self.window,
                 self.pointer_cache[cache_index]);
-    }
-
-    //*************************************************************************
-    pub fn cliprdr_format_list(self: *rdp_x11_t, channel_id: u16,
-            msg_flags: u16, num_formats: u32,
-            formats: [*]c.cliprdr_format_t) !void
-    {
-        try self.session.logln(log.LogLevel.debug, @src(),
-                "channel_id 0x{X} msg_flags {}", .{channel_id, msg_flags});
-        for (0..num_formats) |index|
-        {
-            const format = &formats[index];
-            try self.session.logln(log.LogLevel.debug, @src(),
-                    "index {} format_id {} format_name_bytes {}",
-                    .{index, format.format_id, format.format_name_bytes});
-        }
-
-        var rv = c.cliprdr_send_format_list_response(self.session.cliprdr,
-                channel_id, c.CB_RESPONSE_OK);
-        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, X11Error.BadClipRdr);
-
-        rv = c.cliprdr_send_data_request(self.session.cliprdr, channel_id, 1);
-        try err_if(rv != c.LIBCLIPRDR_ERROR_NONE, X11Error.BadClipRdr);
-    }
-
-    //*************************************************************************
-    pub fn cliprdr_format_list_response(self: *rdp_x11_t, channel_id: u16,
-            msg_flags: u16) !void
-    {
-        try self.session.logln(log.LogLevel.debug, @src(),
-                "msg_flags {}", .{msg_flags});
-        _ = channel_id;
-    }
-
-    //*************************************************************************
-    pub fn cliprdr_data_request(self: *rdp_x11_t, channel_id: u16,
-            requested_format_id: u32) !void
-    {
-        try self.session.logln(log.LogLevel.debug, @src(),
-                "requested_format_id {}", .{requested_format_id});
-        _ = channel_id;
-    }
-
-    //*************************************************************************
-    pub fn cliprdr_data_response(self: *rdp_x11_t, channel_id: u16,
-            msg_flags: u16, requested_format_data: ?*anyopaque,
-            requested_format_data_bytes: u32) !void
-    {
-        try self.session.logln(log.LogLevel.debug, @src(),
-                "msg_flags {}", .{msg_flags});
-        _ = channel_id;
-        _ = requested_format_data;
-        _ = requested_format_data_bytes;
     }
 
 };

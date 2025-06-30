@@ -2,6 +2,7 @@ const std = @import("std");
 const log = @import("log");
 const hexdump = @import("hexdump");
 const rdpc_x11 = @import("rdpc_x11.zig");
+const rdpc_x11_clip = @import("rdpc_x11_clip.zig");
 const rdpc_pulse = @import("rdpc_pulse.zig");
 const net = std.net;
 const posix = std.posix;
@@ -15,6 +16,7 @@ pub const c = @cImport(
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
     @cInclude("X11/extensions/XShm.h");
+    @cInclude("X11/extensions/Xfixes.h");
     @cInclude("X11/Xcursor/Xcursor.h");
     @cInclude("pulse/pulseaudio.h");
     @cInclude("librdpc.h");
@@ -121,7 +123,7 @@ pub const rdpsnd_format_t = struct
 
     //*************************************************************************
     fn create_from_format(allocator: *const std.mem.Allocator,
-            format: *c.format_t) !*rdpsnd_format_t
+            format: *c.rdpsnd_format_t) !*rdpsnd_format_t
     {
         const self = try allocator.create(rdpsnd_format_t);
         self.* = .{.allocator = allocator,
@@ -743,6 +745,19 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
+    fn get_audio_bytes_in_queue(self: *rdp_session_t) usize
+    {
+        var bytes: usize = 0;
+        var audio = self.audio_head;
+        while (audio) |aaudio|
+        {
+            bytes += aaudio.slice.len;
+            audio = aaudio.next;
+        }
+        return bytes;
+    }
+
+    //*************************************************************************
     fn process_write_pulse_data(self: *rdp_session_t) !void
     {
         if (self.pulse) |apulse|
@@ -765,7 +780,10 @@ pub const rdp_session_t = struct
                             // if audio_head is null, set audio_tail to null
                             self.audio_tail = null;
                         }
-                        const mstime = apulse.get_latency() catch 0;
+                        const bytes = self.get_audio_bytes_in_queue();
+                        const mstime = apulse.get_latency(bytes) catch 0;
+                        try self.logln_devel(log.LogLevel.debug, @src(),
+                                "mstime {} bytes {}", .{mstime, bytes});
                         _ = c.rdpsnd_send_waveconfirm(self.rdpsnd,
                                 audio.channel_id,
                                 @truncate(audio.time_stamp + mstime),
@@ -905,6 +923,12 @@ pub const rdp_session_t = struct
         try self.logln(log.LogLevel.info, @src(),
             "channel_id 0x{X} version {} general_flags 0x{X}",
             .{channel_id, version, general_flags});
+        if (self.rdp_x11) |ardp_x11|
+        {
+            try ardp_x11.rdp_x11_clip.cliprdr_ready(channel_id,
+                    version, general_flags);
+        }
+
         return c.cliprdr_send_capabilities(self.cliprdr, channel_id,
                 version, general_flags);
     }
@@ -919,8 +943,8 @@ pub const rdp_session_t = struct
             .{channel_id, num_formats});
         if (self.rdp_x11) |ardp_x11|
         {
-            try ardp_x11.cliprdr_format_list(channel_id, msg_flags,
-                    num_formats, formats);
+            try ardp_x11.rdp_x11_clip.cliprdr_format_list(channel_id,
+                    msg_flags, num_formats, formats);
             return c.LIBCLIPRDR_ERROR_NONE;
         }
         return c.LIBCLIPRDR_ERROR_FORMAT_LIST;
@@ -934,7 +958,8 @@ pub const rdp_session_t = struct
             "msg_flags 0x{X}", .{msg_flags});
         if (self.rdp_x11) |ardp_x11|
         {
-            try ardp_x11.cliprdr_format_list_response(channel_id, msg_flags);
+            try ardp_x11.rdp_x11_clip.cliprdr_format_list_response(channel_id,
+                    msg_flags);
             return c.LIBCLIPRDR_ERROR_NONE;
         }
         return c.LIBCLIPRDR_ERROR_FORMAT_LIST;
@@ -948,7 +973,8 @@ pub const rdp_session_t = struct
             "requested_format_id 0x{X}", .{requested_format_id});
         if (self.rdp_x11) |ardp_x11|
         {
-            try ardp_x11.cliprdr_data_request(channel_id, requested_format_id);
+            try ardp_x11.rdp_x11_clip.cliprdr_data_request(channel_id,
+                    requested_format_id);
             return c.LIBCLIPRDR_ERROR_NONE;
         }
         return c.LIBCLIPRDR_ERROR_DATA_REQUEST;
@@ -964,8 +990,9 @@ pub const rdp_session_t = struct
             .{msg_flags, requested_format_data_bytes});
         if (self.rdp_x11) |ardp_x11|
         {
-            try ardp_x11.cliprdr_data_response(channel_id, msg_flags,
-                    requested_format_data, requested_format_data_bytes);
+            try ardp_x11.rdp_x11_clip.cliprdr_data_response(channel_id,
+                    msg_flags, requested_format_data,
+                    requested_format_data_bytes);
             return c.LIBCLIPRDR_ERROR_NONE;
         }
         return c.LIBCLIPRDR_ERROR_DATA_RESPONSE;
@@ -1081,14 +1108,14 @@ pub const rdp_session_t = struct
     fn rdpsnd_process_formats(self: *rdp_session_t, channel_id: u16,
             flags: u32, volume: u32, pitch: u32, dgram_port: u16,
             version: u16, block_no: u8,
-            num_formats: u16, formats: [*]c.format_t) !c_int
+            num_formats: u16, formats: [*]c.rdpsnd_format_t) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
                 "channel_id 0x{X} flags {} volume {} pitch {} " ++
                 "dgram_port {} version {} block_no {} num_formats {}",
                 .{channel_id, flags, volume, pitch, dgram_port, version,
                 block_no, num_formats});
-        var sformats = std.ArrayList(c.format_t).init(self.allocator.*);
+        var sformats = std.ArrayList(c.rdpsnd_format_t).init(self.allocator.*);
         defer sformats.deinit();
         if (self.pulse == null)
         {
@@ -1822,7 +1849,7 @@ fn cb_rdpsnd_process_training(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
 fn cb_rdpsnd_process_formats(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
         flags: u32, volume: u32, pitch: u32, dgram_port: u16,
         version: u16, block_no: u8, num_formats: u16,
-        formats: ?[*]c.format_t) callconv(.C) c_int
+        formats: ?[*]c.rdpsnd_format_t) callconv(.C) c_int
 {
     if (rdpsnd) |ardpsnd|
     {
