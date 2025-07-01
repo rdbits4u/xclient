@@ -19,6 +19,8 @@ const clip_state = enum
     idle,
     requested_data, // cliprdr_send_data_request called
     format_list, // cliprdr_send_format_list called
+    incr_notify,
+    incr_request,
 };
 
 pub const cliprdr_format_t = struct
@@ -82,8 +84,14 @@ pub const rdp_x11_clip_t = struct
     requested_format: u16 = 0,
     requested_target: c.Atom = c.None,
 
-    max_request_size: c_long = 0,
-    ex_max_request_size: c_long = 0,
+    // INCR
+    incr_notify_property: c.Atom = c.None,
+    incr_notify_target: c.Atom = c.None,
+    incr_notify_window: c.Window = c.None,
+
+    incr_request_property: c.Atom = c.None,
+    incr_request_target: c.Atom = c.None,
+    incr_request_window: c.Window = c.None,
 
     //*************************************************************************
     pub fn create(allocator: *const std.mem.Allocator,
@@ -112,14 +120,7 @@ pub const rdp_x11_clip_t = struct
     pub fn cliprdr_ready(self: *rdp_x11_clip_t, channel_id: u16,
             version: u32, general_flags: u32) !void
     {
-        const x11 = self.rdp_x11;
         self.channel_id = channel_id;
-        self.max_request_size = c.XMaxRequestSize(x11.display);
-        try self.session.logln(log.LogLevel.debug, @src(),
-                "XMaxRequestSize {}", .{self.max_request_size});
-        self.ex_max_request_size = c.XExtendedMaxRequestSize(x11.display);
-        try self.session.logln(log.LogLevel.debug, @src(),
-                "XExtendedMaxRequestSize {}", .{self.ex_max_request_size});
         _ = version;
         _ = general_flags;
     }
@@ -230,11 +231,21 @@ pub const rdp_x11_clip_t = struct
     fn handle_property_notify(self: *rdp_x11_clip_t,
                 event: *c.XPropertyEvent) !void
     {
+        //const x11 = self.rdp_x11;
         self.server_time = event.time;
         self.client_time = std.time.milliTimestamp();
-        try self.session.logln(log.LogLevel.debug, @src(),
-                        "server time {} client time {}",
-                        .{self.server_time, self.client_time});
+        if ((self.state == clip_state.incr_notify) and
+                (event.window == self.incr_notify_window) and
+                (event.atom == self.incr_notify_property) and
+                (event.state == c.PropertyNewValue))
+        {
+        }
+        if ((self.state == clip_state.incr_request) and
+                (event.window == self.incr_request_window) and
+                (event.atom == self.incr_request_property) and
+                (event.state == c.PropertyDelete))
+        {
+        }
     }
 
     //*************************************************************************
@@ -255,7 +266,7 @@ pub const rdp_x11_clip_t = struct
         const x11 = self.rdp_x11;
         _ = c.XChangeProperty(x11.display, event.requestor, event.property,
                 type1, format, c.PropModeReplace, data, @bitCast(count));
-        var xev: c.XEvent = undefined;
+        var xev = std.mem.zeroes(c.XEvent);
         xev.xselection.type = c.SelectionNotify;
         xev.xselection.send_event = c.True;
         xev.xselection.display = event.display;
@@ -275,7 +286,7 @@ pub const rdp_x11_clip_t = struct
         try self.session.logln(log.LogLevel.debug, @src(), "requestor {}",
                 .{event.requestor});
         const x11 = self.rdp_x11;
-        var xev: c.XEvent = undefined;
+        var xev = std.mem.zeroes(c.XEvent);
         xev.xselection.type = c.SelectionNotify;
         xev.xselection.send_event = c.True;
         xev.xselection.display = event.display;
@@ -311,8 +322,9 @@ pub const rdp_x11_clip_t = struct
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "property is None", .{});
+            return;
         }
-        else if (event.target == x11.targets_atom)
+        if (event.target == x11.targets_atom)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is targets_atom", .{});
@@ -328,19 +340,22 @@ pub const rdp_x11_clip_t = struct
             }
             atom_buf[atom_count] = 0;
             const ptr: *u8 = @ptrCast(&atom_buf[0]);
-            try self.provide_selection(event, c.XA_ATOM, 32, ptr, atom_count);
+            return self.provide_selection(event, c.XA_ATOM, 32,
+                    ptr, atom_count);
         }
-        else if (event.target == x11.timestamp_atom)
+        if (event.target == x11.timestamp_atom)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is timestamp_atom", .{});
+            return;
         }
-        else if (event.target == x11.multiple_atom)
+        if (event.target == x11.multiple_atom)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is multiple_atom", .{});
+            return;
         }
-        else if (event.target == x11.utf8_atom)
+        if (event.target == x11.utf8_atom)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is utf8_atom", .{});
@@ -356,12 +371,10 @@ pub const rdp_x11_clip_t = struct
             self.requested_target = x11.utf8_atom;
             _ = c.cliprdr_send_data_request(self.session.cliprdr,
                     self.channel_id, c.CF_UNICODETEXT);
+            return;
         }
-        else
-        {
-            try self.session.logln(log.LogLevel.debug, @src(),
-                    "target is other", .{});
-        }
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "target is other", .{});
     }
 
     //*************************************************************************
@@ -412,81 +425,67 @@ pub const rdp_x11_clip_t = struct
                 self.channel_id, c.CB_RESPONSE_OK,
                 utf16_as_u8.ptr, @truncate(bytes_written_out));
     }
-
+    
     //*************************************************************************
     fn handle_selection_notify(self: *rdp_x11_clip_t,
             event: *c.XSelectionEvent) !void
     {
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
         const x11 = self.rdp_x11;
+        const com = x11.rdp_x11_common;
         if (event.property == c.None)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "property is None", .{});
+            return;
         }
-        else if (event.target == x11.targets_atom)
+        const prop_type = try
+                com.get_window_property_type(event.requestor, event.property);
+        if (prop_type == x11.incr_atom)
+        {
+            try self.session.logln(log.LogLevel.debug, @src(), "INCR", .{});
+            _ = c.XDeleteProperty(x11.display, event.requestor,
+                    event.property);
+            if (self.state != clip_state.idle)
+            {
+                try self.session.logln(log.LogLevel.debug, @src(),
+                        "bad state {}, should be idle", .{self.state});
+                return;
+            }
+            self.incr_notify_property = event.property;
+            self.incr_notify_target = event.target;
+            self.incr_notify_window = x11.window;
+            self.state = clip_state.incr_notify;
+            // nothing more to do here, the data is coming in through
+            // PropertyNotify
+            return;
+        }
+        if (event.target == x11.targets_atom)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is targets_atom", .{});
-            var ltype: c.Atom = c.None;
-            var lformat: c_int = 0;
-            var nitems: c_ulong = 0;
-            var bytes_after: c_ulong = 0;
-            var prop: ?*u8 = null;
-            _ = c.XGetWindowProperty(x11.display, event.requestor,
-                    event.property, 0, 16, 0, c.AnyPropertyType,
-                    &ltype, &lformat, &nitems, &bytes_after, &prop);
-            try self.session.logln(log.LogLevel.debug, @src(),
-                    "ltype {} lformat {} nitems {} bytes_after {} prop {*}",
-                    .{ltype, lformat, nitems, bytes_after, prop});
-            if (prop) |aprop|
-            {
-                defer _ = c.XFree(aprop);
-                if ((ltype == c.XA_ATOM) and (lformat == 32))
-                {
-                    var atom_slice: []c.Atom = undefined;
-                    atom_slice.ptr = @alignCast(@ptrCast(aprop));
-                    atom_slice.len = nitems;
-                    return self.process_target_targets(atom_slice);
-                }
-            }
+            var atom_list = std.ArrayList(c.Atom).init(self.allocator.*);
+            defer atom_list.deinit();
+            try com.get_window_property(c.Atom, &atom_list,
+                    event.requestor, event.property, c.XA_ATOM, 32);
+            _ = c.XDeleteProperty(x11.display, event.requestor,
+                    event.property);
+            return self.process_target_targets(atom_list.items);
         }
-        else if (event.target == x11.utf8_atom)
+        if (event.target == x11.utf8_atom)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is utf8_atom", .{});
-            var ltype: c.Atom = c.None;
-            var lformat: c_int = 0;
-            var nitems: c_ulong = 0;
-            var bytes_after: c_ulong = 0;
-            var prop: ?*u8 = null;
-            _ = c.XGetWindowProperty(x11.display, event.requestor,
-                    event.property, 0, self.max_request_size, 0,
-                    c.AnyPropertyType, &ltype, &lformat, &nitems,
-                    &bytes_after, &prop);
-            try self.session.logln(log.LogLevel.debug, @src(),
-                    "ltype {} lformat {} nitems {} bytes_after {} prop {*}",
-                    .{ltype, lformat, nitems, bytes_after, prop});
-            if (prop) |aprop|
-            {
-                defer _ = c.XFree(aprop);
-                if ((ltype == x11.utf8_atom) and (lformat == 8))
-                {
-                    var utf8_slice: []u8 = undefined;
-                    utf8_slice.ptr = @alignCast(@ptrCast(aprop));
-                    utf8_slice.len = nitems;
-                    return self.process_target_utf8(utf8_slice);
-                }
-            }
-            // error
-            _ = c.cliprdr_send_data_response(self.session.cliprdr,
-                    self.channel_id, c.CB_RESPONSE_FAIL, null, 0);
+            var utf8_list = std.ArrayList(u8).init(self.allocator.*);
+            defer utf8_list.deinit();
+            try com.get_window_property(u8, &utf8_list,
+                    event.requestor, event.property, x11.utf8_atom, 8);
+            _ = c.XDeleteProperty(x11.display, event.requestor,
+                    event.property);
+            return self.process_target_utf8(utf8_list.items);
         }
-        else
-        {
-            try self.session.logln(log.LogLevel.debug, @src(),
-                    "unhandled target is {}", .{event.target});
-        }
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "unhandled target is {}", .{event.target});
     }
 
     //*************************************************************************

@@ -4,6 +4,7 @@ const strings = @import("strings");
 const log = @import("log");
 const rdpc_session = @import("rdpc_session.zig");
 const rdpc_x11_clip = @import("rdpc_x11_clip.zig");
+const rdpc_x11_common = @import("rdpc_x11_common.zig");
 const net = std.net;
 const posix = std.posix;
 
@@ -15,6 +16,7 @@ pub const X11Error = error
     BadPointerCacheIndex,
     BadOpenDisplay,
     BadClipRdr,
+    GetWindowProperty,
 };
 
 //*****************************************************************************
@@ -35,6 +37,7 @@ pub const rdp_x11_t = struct
     session: *rdpc_session.rdp_session_t,
     allocator: *const std.mem.Allocator,
     display: *c.Display,
+    rdp_x11_common: *rdpc_x11_common.rdp_x11_common_t,
     rdp_x11_clip: *rdpc_x11_clip.rdp_x11_clip_t,
     fd: c_int = 0,
     screen_number: c_int = 0,
@@ -69,6 +72,8 @@ pub const rdp_x11_t = struct
     need_keyboard_sync: bool = false,
     xfixes_event_base: i32 = 0,
     xfixes_error_base: i32 = 0,
+    max_request_size: c_long = 0,
+    ex_max_request_size: c_long = 0,
 
     //*************************************************************************
     pub fn create(session: *rdpc_session.rdp_session_t,
@@ -80,10 +85,13 @@ pub const rdp_x11_t = struct
         const dis = c.XOpenDisplay(null);
         const display = if (dis) |adis| adis else return X11Error.BadOpenDisplay;
         errdefer _ = c.XCloseDisplay(display);
+        const rdp_x11_common = try rdpc_x11_common.rdp_x11_common_t.create(allocator,
+                session, self);
         const rdp_x11_clip = try rdpc_x11_clip.rdp_x11_clip_t.create(allocator,
                 session, self);
         self.* = .{.session = session, .allocator = allocator,
-                .display = display, .rdp_x11_clip = rdp_x11_clip};
+                .display = display, .rdp_x11_clip = rdp_x11_clip,
+                .rdp_x11_common = rdp_x11_common};
         try self.session.logln(log.LogLevel.debug, @src(),
                 "rdp_x11_t width {} height {}", .{width, height});
         self.width = width;
@@ -143,6 +151,13 @@ pub const rdp_x11_t = struct
         const no_text: [4]u8 = .{0, 0, 0, 0};
         _ = c.XChangeProperty(self.display, self.window, self.get_time_atom,
                     c.XA_STRING, 8, c.PropModeAppend, &no_text, 0);
+
+        self.max_request_size = c.XMaxRequestSize(self.display);
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "XMaxRequestSize {}", .{self.max_request_size});
+        self.ex_max_request_size = c.XExtendedMaxRequestSize(self.display);
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "XExtendedMaxRequestSize {}", .{self.ex_max_request_size});
 
         // flush to send all requests to xserver
         _ = c.XFlush(self.display);
@@ -567,10 +582,10 @@ pub const rdp_x11_t = struct
     pub fn check_fds(self: *rdp_x11_t) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
-        var event: c.XEvent = undefined;
         while (c.XPending(self.display) > 0)
         {
             try self.session.logln_devel(log.LogLevel.debug, @src(), "loop", .{});
+            var event = std.mem.zeroes(c.XEvent);
             _ = c.XNextEvent(self.display, &event);
             switch (event.type)
             {
