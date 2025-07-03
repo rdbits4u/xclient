@@ -140,7 +140,8 @@ pub const rdp_x11_clip_t = struct
             acliprdr_format.delete();
         }
         self.formats.clearRetainingCapacity();
-        // copy formats
+        // copy, check formats
+        var format_ok = false;
         for (0..num_formats) |index|
         {
             const format = &formats[index];
@@ -152,10 +153,17 @@ pub const rdp_x11_clip_t = struct
             errdefer cliprdr_format.delete();
             const aformat = try self.formats.addOne();
             aformat.* = cliprdr_format;
+            if (format.format_id == c.CF_UNICODETEXT)
+            {
+                format_ok = true;
+            }
         }
-        const x11 = self.rdp_x11;
-        _ = c.XSetSelectionOwner(x11.display, x11.clipboard_atom,
-                x11.window, c.CurrentTime);
+        if (format_ok)
+        {
+            const x11 = self.rdp_x11;
+            _ = c.XSetSelectionOwner(x11.display, x11.clipboard_atom,
+                    x11.window, c.CurrentTime);
+        }
     }
 
     //*************************************************************************
@@ -416,11 +424,14 @@ pub const rdp_x11_clip_t = struct
         defer al.deinit();
         try strings.utf8_to_u32_array(utf8, &al);
         const utf16_as_u8 = try self.allocator.alloc(u8,
-                (al.items.len + 1) * 4);
+                (al.items.len + 16) * 4);
         defer self.allocator.free(utf16_as_u8);
         var bytes_written_out: usize = 0;
         try strings.u32_array_to_utf16Z_as_u8(&al, utf16_as_u8,
                 &bytes_written_out);
+        try self.session.logln(log.LogLevel.debug, @src(),
+                "utf8 length {} utf16 length {}",
+                .{utf8.len, bytes_written_out});
         _ = c.cliprdr_send_data_response(self.session.cliprdr,
                 self.channel_id, c.CB_RESPONSE_OK,
                 utf16_as_u8.ptr, @truncate(bytes_written_out));

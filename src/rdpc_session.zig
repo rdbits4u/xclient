@@ -308,22 +308,25 @@ pub const rdp_session_t = struct
     fn send_slice_to_server(self: *rdp_session_t, data: []u8) !void
     {
         var slice = data;
-        // try to send
-        const result = posix.send(self.sck, slice, 0);
-        if (result) |aresult|
+        if (self.send_head == null)
         {
-            if (aresult >= slice.len)
+            // try to send
+            const result = posix.send(self.sck, slice, 0);
+            if (result) |aresult|
             {
-                // all sent, ok
-                return;
+                if (aresult >= slice.len)
+                {
+                    // all sent, ok
+                    return;
+                }
+                slice = slice[aresult..];
             }
-            slice = slice[aresult..];
-        }
-        else |err|
-        {
-            if (err != error.WouldBlock)
+            else |err|
             {
-                return err;
+                if (err != error.WouldBlock)
+                {
+                    return err;
+                }
             }
         }
         // save any left over data to send later

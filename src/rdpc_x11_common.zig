@@ -46,7 +46,7 @@ pub const rdp_x11_common_t = struct
         try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
         const x11 = self.rdp_x11;
         var long_offset: c_long = 0;
-        const long_length: c_long = self.rdp_x11.max_request_size - 8;
+        const long_length: c_long = x11.max_request_size - 8;
         while (true)
         {
             var ltype: c.Atom = c.None;
@@ -101,12 +101,12 @@ pub const rdp_x11_common_t = struct
                 c.AnyPropertyType, &ltype, &lformat, &lnitems,
                 &lbytes_after, &lprop);
         try err_if(rv != c.Success, X11Error.GetWindowProperty);
+        try err_if(ltype == c.None, X11Error.GetWindowProperty);
+        try err_if(lformat == 0, X11Error.GetWindowProperty);
         if (lprop) |aprop|
         {
             _ = c.XFree(aprop);
         }
-        try err_if(ltype == c.None, X11Error.GetWindowProperty);
-        try err_if(lformat == 0, X11Error.GetWindowProperty);
         return ltype;
     }
 
