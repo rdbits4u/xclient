@@ -62,8 +62,6 @@ pub const rdp_x11_common_t = struct
                     "ltype {} lformat {} nitems {} bytes_after {} prop {*}",
                     .{ltype, lformat, lnitems, lbytes_after, lprop});
             try err_if(rv != c.Success, X11Error.GetWindowProperty);
-            try err_if(ltype == c.None, X11Error.GetWindowProperty);
-            try err_if(lformat == 0, X11Error.GetWindowProperty);
             if (lprop) |aprop|
             {
                 defer _ = c.XFree(aprop);
@@ -75,7 +73,7 @@ pub const rdp_x11_common_t = struct
                     try al.appendSlice(slice);
                 }
             }
-            if (lbytes_after < 1)
+            if ((lbytes_after < 1) or (lformat < 1))
             {
                 break;
             }
@@ -101,8 +99,6 @@ pub const rdp_x11_common_t = struct
                 c.AnyPropertyType, &ltype, &lformat, &lnitems,
                 &lbytes_after, &lprop);
         try err_if(rv != c.Success, X11Error.GetWindowProperty);
-        try err_if(ltype == c.None, X11Error.GetWindowProperty);
-        try err_if(lformat == 0, X11Error.GetWindowProperty);
         if (lprop) |aprop|
         {
             _ = c.XFree(aprop);
