@@ -358,8 +358,8 @@ pub const rdp_x11_t = struct
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "x {} y {} button 0x{X}", .{event.x, event.y, event.button});
         var levent: u16 = undefined;
-        const x: u16 = @intCast(event.x);
-        const y: u16 = @intCast(event.y);
+        const x = u16_from_c_int(event.x);
+        const y = u16_from_c_int(event.y);
         if (event.button == c.Button1)
         {
             levent = c.PTRFLAGS_BUTTON1 | c.PTRFLAGS_DOWN;
@@ -393,8 +393,8 @@ pub const rdp_x11_t = struct
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
         var levent: u16 = undefined;
-        const x: u16 = @intCast(event.x);
-        const y: u16 = @intCast(event.y);
+        const x = u16_from_c_int(event.x);
+        const y = u16_from_c_int(event.y);
         const delta: i16 = 120;
         if (event.button == c.Button1)
         {
@@ -450,8 +450,9 @@ pub const rdp_x11_t = struct
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "x {} y {}", .{event.x, event.y});
-        _ = c.rdpc_send_mouse_event(self.session.rdpc, c.PTRFLAGS_MOVE,
-                @intCast(event.x), @intCast(event.y));
+        const x = u16_from_c_int(event.x);
+        const y = u16_from_c_int(event.y);
+        _ = c.rdpc_send_mouse_event(self.session.rdpc, c.PTRFLAGS_MOVE, x, y);
     }
 
     //*************************************************************************
@@ -973,3 +974,11 @@ pub const rdp_x11_t = struct
     }
 
 };
+
+//*****************************************************************************
+fn u16_from_c_int(in: c_int) u16
+{
+    const max = std.math.maxInt(u16);
+    const val = if (in < 0) 0 else if (in > max) max else in;
+    return @intCast(val);
+}
