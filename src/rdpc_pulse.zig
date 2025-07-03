@@ -130,8 +130,8 @@ pub const rdp_pulse_t = struct
         c.pa_threaded_mainloop_lock(self.pa_mainloop);
         defer c.pa_threaded_mainloop_unlock(self.pa_mainloop);
 
-        self.pa_stream = c.pa_stream_new(self.pa_context, name, &self.sample_spec,
-                channel_map_p);
+        self.pa_stream = c.pa_stream_new(self.pa_context, name,
+                &self.sample_spec, channel_map_p);
         try err_if (self.pa_stream == null, PulseError.PaStream);
 
         // install essential callbacks
