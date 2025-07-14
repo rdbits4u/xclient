@@ -17,8 +17,8 @@ const err_if = rdpc_x11.err_if;
 const clip_state = enum
 {
     idle,
-    requested_data, // cliprdr_send_data_request called
-    format_list, // cliprdr_send_format_list called
+    send_requested_data, // cliprdr_send_data_request called
+    send_format_list, // cliprdr_send_format_list called
     incr_notify,
     incr_request,
 };
@@ -172,10 +172,11 @@ pub const rdp_x11_clip_t = struct
     {
         try self.session.logln(log.LogLevel.debug, @src(),
                 "channel_id {} msg_flags {}", .{channel_id, msg_flags});
-        if (self.state != clip_state.format_list)
+        if (self.state != clip_state.send_format_list)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
-                    "bad state {}, should be format_list", .{self.state});
+                    "bad state {}, should be send_format_list",
+                    .{self.state});
             return;
         }
         self.state = clip_state.idle;
@@ -204,10 +205,11 @@ pub const rdp_x11_clip_t = struct
     {
         try self.session.logln(log.LogLevel.debug, @src(),
                 "channel_id {} msg_flags {}", .{channel_id, msg_flags});
-        if (self.state != clip_state.requested_data)
+        if (self.state != clip_state.send_requested_data)
         {
             try self.session.logln(log.LogLevel.debug, @src(),
-                    "bad state {}, should be requested_data", .{self.state});
+                    "bad state {}, should be send_requested_data",
+                    .{self.state});
             return;
         }
         self.state = clip_state.idle;
@@ -373,7 +375,7 @@ pub const rdp_x11_clip_t = struct
                         "bad state {}, should be idle", .{self.state});
                 return;
             }
-            self.state = clip_state.requested_data;
+            self.state = clip_state.send_requested_data;
             self.selection_req_event = event.*;
             self.requested_format = c.CF_UNICODETEXT;
             self.requested_target = x11.utf8_atom;
@@ -409,7 +411,7 @@ pub const rdp_x11_clip_t = struct
                         "bad state {}, should be idle", .{self.state});
                 return;
             }
-            self.state = clip_state.format_list;
+            self.state = clip_state.send_format_list;
             const rv = c.cliprdr_send_format_list(self.session.cliprdr,
                 self.channel_id, 0, @truncate(al.items.len), &al.items[0]);
             _ = rv;
