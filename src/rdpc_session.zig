@@ -265,6 +265,8 @@ pub const rdp_session_t = struct
         {
             ardp_x11.delete();
         }
+        _ = c.rdpsnd_delete(self.rdpsnd);
+        _ = c.cliprdr_delete(self.cliprdr);
         _ = c.svc_delete(self.svc);
         _ = c.rdpc_delete(self.rdpc);
         if (self.sck != -1)
@@ -308,6 +310,10 @@ pub const rdp_session_t = struct
     fn send_slice_to_server(self: *rdp_session_t, data: []u8) !void
     {
         var slice = data;
+        if (slice.len < 1)
+        {
+            return;
+        }
         if (self.send_head == null)
         {
             // try to send
