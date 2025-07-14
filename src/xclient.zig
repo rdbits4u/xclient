@@ -153,8 +153,6 @@ fn process_args(settings: *c.rdpc_settings_t,
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
-            try log.logln(log.LogLevel.info, @src(), "{} {} {s}",
-                    .{index, count, slice_arg});
             strings.copyZ(&settings.username, slice_arg);
             try hexdump.printHexDump(0, &settings.username);
         }
