@@ -325,7 +325,7 @@ pub const rdp_session_t = struct
         {
             return;
         }
-        if (self.send_head == null)
+        if ((self.send_head == null) and try can_send(self.sck))
         {
             // try to send
             const result = posix.send(self.sck, slice, 0);
@@ -750,6 +750,10 @@ pub const rdp_session_t = struct
     // data from the rdp server
     fn read_process_server_data(self: *rdp_session_t) !void
     {
+        if (try can_recv(self.sck) == false)
+        {
+            return;
+        }
         try self.logln_devel(log.LogLevel.info, @src(),
                 "server sck is set", .{});
         const recv_slice = self.in_data_slice[self.recv_start..];
@@ -801,6 +805,10 @@ pub const rdp_session_t = struct
     //*************************************************************************
     fn process_write_server_data(self: *rdp_session_t) !void
     {
+        if (try can_send(self.sck) == false)
+        {
+            return;
+        }
         if (!self.connected)
         {
             self.connected = true;
@@ -1418,6 +1426,42 @@ pub fn fifo_clear(fifo: *[2]i32) !void
         var buf: [4]u8 = undefined;
         _ = try posix.read(fifo[0], &buf);
     }
+}
+
+//*****************************************************************************
+fn can_recv(asck: i32) !bool
+{
+    var polfds: [1]posix.pollfd = undefined;
+    polfds[0].fd = asck;
+    polfds[0].events = posix.POLL.IN;
+    polfds[0].revents = 0;
+    const poll_rv = try posix.poll(&polfds, 0);
+    if (poll_rv > 0)
+    {
+        if ((polfds[0].revents & posix.POLL.IN) != 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+//*****************************************************************************
+fn can_send(asck: i32) !bool
+{
+    var polfds: [1]posix.pollfd = undefined;
+    polfds[0].fd = asck;
+    polfds[0].events = posix.POLL.OUT;
+    polfds[0].revents = 0;
+    const poll_rv = try posix.poll(&polfds, 0);
+    if (poll_rv > 0)
+    {
+        if ((polfds[0].revents & posix.POLL.OUT) != 0)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 //*****************************************************************************

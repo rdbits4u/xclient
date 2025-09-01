@@ -395,7 +395,7 @@ pub const rdp_x11_t = struct
         var levent: u16 = undefined;
         const x = u16_from_c_int(event.x);
         const y = u16_from_c_int(event.y);
-        const delta: i16 = 120;
+        const delta: i16 = 60;
         if (event.button == c.Button1)
         {
             levent = c.PTRFLAGS_BUTTON1;

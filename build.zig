@@ -34,14 +34,10 @@ pub fn build(b: *std.Build) void
     xclient.linkSystemLibrary("libpulse");
     xclient.addObjectFile(b.path("../librfxcodec/zig-out/lib/librfxdecode.a"));
     xclient.addObjectFile(b.path("../librlecodec/zig-out/lib/librledecode.a"));
-    xclient.addObjectFile(b.path("../rdpc/zig-out/lib/librdpc.so"));
-    xclient.addObjectFile(b.path("../svc/zig-out/lib/libsvc.so"));
-    xclient.addObjectFile(b.path("../cliprdr/zig-out/lib/libcliprdr.so"));
-    xclient.addObjectFile(b.path("../rdpsnd/zig-out/lib/librdpsnd.so"));
-    xclient.addLibraryPath(.{.cwd_relative = "../rdpc/zig-out/lib"});
-    xclient.addLibraryPath(.{.cwd_relative = "../svc/zig-out/lib"});
-    xclient.addLibraryPath(.{.cwd_relative = "../cliprdr/zig-out/lib"});
-    xclient.addLibraryPath(.{.cwd_relative = "../rdpsnd/zig-out/lib"});
+    xclient.addObjectFile(b.path("../rdpc/zig-out/lib/librdpc.a"));
+    xclient.addObjectFile(b.path("../svc/zig-out/lib/libsvc.a"));
+    xclient.addObjectFile(b.path("../cliprdr/zig-out/lib/libcliprdr.a"));
+    xclient.addObjectFile(b.path("../rdpsnd/zig-out/lib/librdpsnd.a"));
     xclient.root_module.addImport("hexdump", b.createModule(.{
         .root_source_file = b.path("../common/hexdump.zig"),
     }));
