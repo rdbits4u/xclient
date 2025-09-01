@@ -25,13 +25,15 @@ pub fn build(b: *std.Build) void
     xclient.addIncludePath(b.path("../cliprdr/include"));
     xclient.addIncludePath(b.path("../rdpsnd/include"));
     xclient.addIncludePath(b.path("../librfxcodec/include/"));
+    xclient.addIncludePath(b.path("../librlecodec/include/"));
     xclient.linkSystemLibrary("x11");
     xclient.linkSystemLibrary("xext");
     xclient.linkSystemLibrary("xcursor");
     xclient.linkSystemLibrary("xfixes");
     xclient.linkSystemLibrary("pixman-1");
     xclient.linkSystemLibrary("libpulse");
-    xclient.addObjectFile(b.path("../librfxcodec/src/.libs/librfxdecode.a"));
+    xclient.addObjectFile(b.path("../librfxcodec/zig-out/lib/librfxdecode.a"));
+    xclient.addObjectFile(b.path("../librlecodec/zig-out/lib/librledecode.a"));
     xclient.addObjectFile(b.path("../rdpc/zig-out/lib/librdpc.so"));
     xclient.addObjectFile(b.path("../svc/zig-out/lib/libsvc.so"));
     xclient.addObjectFile(b.path("../cliprdr/zig-out/lib/libcliprdr.so"));

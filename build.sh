@@ -43,6 +43,18 @@ then
     exit 0
 fi
 
+# status
+if [ "$1" = "status" ]
+then
+    for proj in $listOfProjects
+    do
+        echo "status ../$proj"
+        cd ../$proj
+        git status -s -uno
+    done
+    exit 0
+fi
+
 # release build
 for proj in $listOfProjects
 do

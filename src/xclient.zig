@@ -113,10 +113,6 @@ fn process_args(settings: *c.rdpc_settings_t,
     settings.dpix = 96;
     settings.dpiy = 96;
     settings.keyboard_layout = 0x0409;
-    settings.rfx = 1;
-    settings.jpg = 0;
-    settings.use_frame_ack = 1;
-    settings.frames_in_flight = 5;
     // get some info from os
     if (std.posix.getenv("USER")) |auser_env|
     {
@@ -231,6 +227,21 @@ fn process_args(settings: *c.rdpc_settings_t,
             {
                 return MyError.ShowCommandLine;
             }
+        }
+        else if (std.mem.eql(u8, slice_arg, "--rfx"))
+        {
+            settings.jpg = 0;
+            settings.rfx = 1;
+            settings.use_frame_ack = 1;
+            settings.frames_in_flight = 5;
+        }
+        else if (std.mem.eql(u8, slice_arg, "--jpeg") or
+                std.mem.eql(u8, slice_arg, "--jpg"))
+        {
+            settings.jpg = 1;
+            settings.rfx = 0;
+            settings.use_frame_ack = 1;
+            settings.frames_in_flight = 5;
         }
         else
         {

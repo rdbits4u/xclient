@@ -707,8 +707,92 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
-    fn draw_image_noshm(self: *rdp_x11_t,
+    fn init_box(box: *c.pixman_box16_t, x: isize, y: isize,
+            width: usize, height: usize) void
+    {
+        box.x1 = @intCast(x);
+        box.y1 = @intCast(y);
+        box.x2 = @intCast(x + @as(isize, @intCast(width)));
+        box.y2 = @intCast(y + @as(isize, @intCast(height)));
+    }
+
+    //*************************************************************************
+    // interect each clip with dst and draw the non null rects
+    fn draw_image_by_clip(self: *rdp_x11_t,
             src_width: c_uint, src_height: c_uint,
+            dst_left: c_int, dst_top: c_int,
+            dst_width: c_uint, dst_height: c_uint,
+            data: []u8, clips: []c.XRectangle, stride_bytes: c_int) !void
+    {
+        var dest_rect: c.pixman_box16_t = undefined;
+        init_box(&dest_rect, dst_left, dst_top,
+                @min(src_width, dst_width),
+                @min(src_height, dst_height));
+        for (clips) |aclip|
+        {
+            try self.session.logln_devel(log.LogLevel.debug, @src(),
+                    "x {} y {} width {} height {}",
+                    .{aclip.x, aclip.y, aclip.width, aclip.height});
+            var clip_rect: c.pixman_box16_t = undefined;
+            init_box(&clip_rect, aclip.x, aclip.y,
+                    aclip.width, aclip.height);
+            var draw_rect: c.pixman_box16_t = undefined;
+            draw_rect.x1 = @max(dest_rect.x1, clip_rect.x1);
+            draw_rect.y1 = @max(dest_rect.y1, clip_rect.y1);
+            draw_rect.x2 = @min(dest_rect.x2, clip_rect.x2);
+            draw_rect.y2 = @min(dest_rect.y2, clip_rect.y2);
+            if ((draw_rect.x2 > draw_rect.x1) and
+                    (draw_rect.y2 > draw_rect.y1))
+            {
+                const draw_width: u16 = @intCast(draw_rect.x2 - draw_rect.x1);
+                const draw_height: u16 = @intCast(draw_rect.y2 - draw_rect.y1);
+                const pd_alloc_size: usize = @as(usize, 4) *
+                        @as(usize, draw_width) * @as(usize, draw_height);
+                try self.session.logln_devel(log.LogLevel.debug, @src(),
+                        "draw_width {} draw_height {} pd_alloc_size {}",
+                        .{draw_width, draw_height, pd_alloc_size});
+                const pixmap_data: []u8 = try self.allocator.alloc(u8,
+                        pd_alloc_size);
+                defer self.allocator.free(pixmap_data);
+                var index: c_int = 0;
+                while (index < draw_height) : (index += 1)
+                {
+                    const lleft: i32 = draw_rect.x1 - dst_left;
+                    const ltop: i32 = draw_rect.y1 - dst_top;
+                    const st = (ltop + index) * stride_bytes + lleft * 4;
+                    const src_start: usize = @intCast(st);
+                    const src_end: usize = src_start + draw_width * 4;
+                    const dst_start: usize = @intCast(index * draw_width * 4);
+                    const dst_end: usize = dst_start + draw_width * 4;
+                    try self.session.logln_devel(log.LogLevel.debug, @src(),
+                            "dst_start {} dst_end {} src_start {} src_end {}",
+                            .{dst_start, dst_end, src_start, src_end});
+                    std.mem.copyForwards(u8,
+                            pixmap_data[dst_start..dst_end],
+                            data[src_start..src_end]);
+                }
+                const image = c.XCreateImage(self.display, self.visual,
+                        self.depth, c.ZPixmap, 0, pixmap_data.ptr,
+                        draw_width, draw_height, 32, draw_width * 4);
+                if (image) |aimage|
+                {
+                    defer _ = c.XFree(aimage);
+                    _ = c.XPutImage(self.display, self.pixmap, self.gc, aimage,
+                            0, 0, draw_rect.x1, draw_rect.y1,
+                            draw_width, draw_height);
+                    _ = c.XCopyArea(self.display, self.pixmap, self.window,
+                            self.gc, draw_rect.x1, draw_rect.y1,
+                            draw_width, draw_height,
+                            draw_rect.x1, draw_rect.y1);
+                }
+            }
+        }
+    }
+
+    //*************************************************************************
+    pub fn draw_image(self: *rdp_x11_t,
+            src_width: c_uint, src_height: c_uint,
+            dst_left: c_int, dst_top: c_int,
             dst_width: c_uint, dst_height: c_uint,
             data: []u8, clips: []c.XRectangle) !void
     {
@@ -725,62 +809,34 @@ pub const rdp_x11_t = struct
                 // draw entire image
                 defer _ = c.XFree(aimage);
                 _ = c.XPutImage(self.display, self.pixmap, self.gc, aimage,
-                        0, 0, 0, 0, dst_width, dst_height);
+                        0, 0, dst_left, dst_top, dst_width, dst_height);
                 _ = c.XCopyArea(self.display, self.pixmap, self.window,
-                        self.gc, 0, 0, dst_width, dst_height, 0, 0);
+                        self.gc, dst_left, dst_top, dst_width, dst_height,
+                        dst_left, dst_top);
             }
         }
         else
         {
-            for (clips) |aclip|
-            {
-                try self.session.logln_devel(log.LogLevel.debug, @src(),
-                        "x {} y {} width {} height {}",
-                        .{aclip.x, aclip.y, aclip.width, aclip.height});
-                const pixmap_data: []u8 = try self.allocator.alloc(u8,
-                        @as(usize, 4) * aclip.width * aclip.height);
-                defer self.allocator.free(pixmap_data);
-                var index: c_int = 0;
-                while (index < aclip.height) : (index += 1)
-                {
-                    const st = (aclip.y + index) * stride_bytes + aclip.x * 4;
-                    const src_start: usize = @intCast(st);
-                    const src_end: usize = src_start + aclip.width * 4;
-                    const dst_start: usize = @intCast(index * aclip.width * 4);
-                    const dst_end: usize = dst_start + aclip.width * 4;
-                    std.mem.copyForwards(u8,
-                            pixmap_data[dst_start..dst_end],
-                            data[src_start..src_end]);
-                }
-                const image = c.XCreateImage(self.display, self.visual,
-                        self.depth, c.ZPixmap, 0, pixmap_data.ptr,
-                        aclip.width, aclip.height, 32, aclip.width * 4);
-                if (image) |aimage|
-                {
-                    defer _ = c.XFree(aimage);
-                    _ = c.XPutImage(self.display, self.pixmap, self.gc, aimage,
-                            0, 0, aclip.x, aclip.y, aclip.width, aclip.height);
-                    _ = c.XCopyArea(self.display, self.pixmap, self.window,
-                            self.gc, aclip.x, aclip.y,
-                            aclip.width, aclip.height, aclip.x, aclip.y);
-                }
-            }
+            try self.draw_image_by_clip(src_width, src_height,
+                    dst_left, dst_top, dst_width, dst_height,
+                    data, clips, stride_bytes);
         }
     }
 
     //*************************************************************************
-    fn draw_image_shm(self: *rdp_x11_t,
+    pub fn draw_image_shm(self: *rdp_x11_t,
             src_width: c_uint, src_height: c_uint,
+            dst_left: c_int, dst_top: c_int,
             dst_width: c_uint, dst_height: c_uint,
-            data: []u8, clips: []c.XRectangle) !void
+            shmid: c_int, shmaddr: [*]u8, clips: []c.XRectangle) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "clips.len {}", .{clips.len});
         var shminfo: c.XShmSegmentInfo = .{};
-        shminfo.shmid = self.session.shm_info.shmid;
-        shminfo.shmaddr = data.ptr;
+        shminfo.shmid = shmid;
+        shminfo.shmaddr = shmaddr;
         const image = c.XShmCreateImage(self.display, self.visual,
-                self.depth, c.ZPixmap, data.ptr, &shminfo,
+                self.depth, c.ZPixmap, shmaddr, &shminfo,
                 src_width, src_height);
         _ = c.XShmAttach(self.display, &shminfo);
         if (clips.len > 0)
@@ -789,32 +845,17 @@ pub const rdp_x11_t = struct
                     clips.ptr, @intCast(clips.len), c.Unsorted);
         }
         _ = c.XShmPutImage(self.display, self.pixmap, self.gc, image,
-                0, 0, 0, 0, dst_width, dst_height, 0);
+                0, 0, dst_left, dst_top, dst_width, dst_height, 0);
         _ = c.XSync(self.display, 0);
         _ = c.XShmDetach(self.display, &shminfo);
         _ = c.XFree(image);
         // GC still has clip for XCopyArea
         _ = c.XCopyArea(self.display, self.pixmap, self.window, self.gc,
-                0, 0, dst_width, dst_height, 0, 0);
+                dst_left, dst_top, dst_width, dst_height, dst_left, dst_top);
         if (clips.len > 0)
         {
             _ = c.XSetClipMask(self.display, self.gc, c.None);
         }
-    }
-
-    //*************************************************************************
-    pub fn draw_image(self: *rdp_x11_t,
-            src_width: c_uint, src_height: c_uint,
-            dst_width: c_uint, dst_height: c_uint,
-            data: []u8, clips: []c.XRectangle) !void
-    {
-        if (self.got_xshm)
-        {
-            return self.draw_image_shm(src_width, src_height,
-                    dst_width, dst_height, data, clips);
-        }
-        return self.draw_image_noshm(src_width, src_height,
-                dst_width, dst_height, data, clips);
     }
 
     //*************************************************************************
