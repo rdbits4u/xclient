@@ -371,7 +371,9 @@ pub const rdp_session_t = struct
         try self.logln_devel(log.LogLevel.info, @src(),
                 "bits_per_pixel {}",
                 .{bitmap_data.bits_per_pixel});
-        const size: u32 = bitmap_data.width * bitmap_data.height * 4;
+        const size: u32 = @as(u32, 4) *
+                @as(u32, bitmap_data.width) *
+                @as(u32, bitmap_data.height);
         if (size == 0)
         {
             return;
@@ -405,7 +407,6 @@ pub const rdp_session_t = struct
             try err_if(rv != 0, SesError.BitmapUpdate);
             if (self.rdp_x11) |ardp_x11|
             {
-                const clips: []c.XRectangle = &.{};
                 // right and bottom are inclusive
                 const dest_width = bitmap_data.dest_right -
                         bitmap_data.dest_left + 1;
@@ -418,7 +419,7 @@ pub const rdp_session_t = struct
                             bitmap_data.dest_left, bitmap_data.dest_top,
                             dest_width, dest_height,
                             self.rle_shm_info.shmid, self.rle_ddata.ptr,
-                            clips);
+                            null, 0);
                 }
                 else
                 {
@@ -427,7 +428,7 @@ pub const rdp_session_t = struct
                             bitmap_data.dest_left, bitmap_data.dest_top,
                             dest_width, dest_height,
                             self.rle_ddata,
-                            clips);
+                            null, 0);
                 }
             }
         }
@@ -476,116 +477,6 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    fn get_rect_reg(self: *rdp_session_t,
-            rects: ?[*]c.rfx_rect, num_rects: i32) !*c.pixman_region16_t
-    {
-        const reg = try self.allocator.create(c.pixman_region16_t);
-        errdefer self.allocator.destroy(reg);
-        reg.* = .{};
-        try err_if(num_rects < 1, SesError.RegZero);
-        if (rects) |arects|
-        {
-            try self.logln_devel(log.LogLevel.info, @src(),
-                    "index 0 x {} y {} cx {} cy {}",
-                    .{arects[0].x, arects[0].y,
-                    arects[0].cx, arects[0].cy});
-            c.pixman_region_init_rect(reg,
-                    arects[0].x, arects[0].y,
-                    @bitCast(arects[0].cx),
-                    @bitCast(arects[0].cy));
-            errdefer c.pixman_region_fini(reg);
-            const count: usize = @intCast(num_rects);
-            for (1..count) |index|
-            {
-                try self.logln_devel(log.LogLevel.info, @src(),
-                        "index {} x {} y {} cx {} cy {}",
-                        .{index, arects[index].x, arects[index].y,
-                        arects[index].cx, arects[index].cy});
-                const pixman_bool = c.pixman_region_union_rect(reg, reg,
-                        arects[index].x, arects[index].y,
-                        @bitCast(arects[index].cx),
-                        @bitCast(arects[index].cy));
-                try err_if(pixman_bool == 0, SesError.RegUnion);
-            }
-        }
-        return reg;
-    }
-
-    //*************************************************************************
-    fn get_tile_reg(self: *rdp_session_t,
-            tiles: ?[*]c.rfx_tile, num_tiles: i32) !*c.pixman_region16_t
-    {
-        const reg = try self.allocator.create(c.pixman_region16_t);
-        errdefer self.allocator.destroy(reg);
-        reg.* = .{};
-        try err_if(num_tiles < 1, SesError.RegZero);
-        if (tiles) |atiles|
-        {
-            try self.logln_devel(log.LogLevel.info, @src(),
-                    "index 0 x {} y {} cx {} cy {}",
-                    .{atiles[0].x, atiles[0].y,
-                    atiles[0].cx, atiles[0].cy});
-            c.pixman_region_init_rect(reg,
-                    atiles[0].x, atiles[0].y,
-                    @bitCast(atiles[0].cx),
-                    @bitCast(atiles[0].cy));
-            errdefer c.pixman_region_fini(reg);
-            const count: usize = @intCast(num_tiles);
-            for (1..count) |index|
-            {
-                try self.logln_devel(log.LogLevel.info, @src(),
-                        "index {} x {} y {} cx {} cy {}",
-                        .{index, atiles[index].x, atiles[index].y,
-                        atiles[index].cx, atiles[index].cy});
-                const pixman_bool = c.pixman_region_union_rect(reg, reg,
-                        atiles[index].x, atiles[index].y,
-                        @bitCast(atiles[index].cx),
-                        @bitCast(atiles[index].cy));
-                try err_if(pixman_bool == 0, SesError.RegUnion);
-            }
-        }
-        return reg;
-    }
-
-    //*************************************************************************
-    fn cleanup_reg(self: *rdp_session_t, reg: *c.pixman_region16_t) void
-    {
-        c.pixman_region_fini(reg);
-        self.allocator.destroy(reg);
-    }
-
-    //*************************************************************************
-    fn get_clips_from_reg(self: *rdp_session_t, width: u16, height: u16,
-            reg: *c.pixman_region16_t) ![]c.XRectangle
-    {
-        var clips: []c.XRectangle = &.{};
-        var box: c.pixman_box16_t = .{.x1 = 0, .y1 = 0,
-                .x2 = @bitCast(width), .y2 = @bitCast(height)};
-        const reg_overlap = c.pixman_region_contains_rectangle(reg, &box);
-        var num_clip_rects: c_int = 0;
-        const clip_rects = c.pixman_region_rectangles(reg, &num_clip_rects);
-        if ((clip_rects != null) and (num_clip_rects > 0) and
-                (reg_overlap == c.PIXMAN_REGION_PART))
-        {
-            const unum_clip_rects: usize = @intCast(num_clip_rects);
-            clips = try self.allocator.alloc(c.XRectangle, unum_clip_rects);
-            errdefer self.allocator.free(clips);
-            for (0..unum_clip_rects) |index|
-            {
-                const x = clip_rects[index].x1;
-                const y = clip_rects[index].y1;
-                const w = clip_rects[index].x2 - x;
-                const h = clip_rects[index].y2 - y;
-                clips[index].x = x;
-                clips[index].y = y;
-                clips[index].width = @bitCast(w);
-                clips[index].height = @bitCast(h);
-            }
-        }
-        return clips;
-    }
-
-    //*************************************************************************
     fn set_surface_bits(self: *rdp_session_t,
             bitmap_data: *c.bitmap_data_ex_t) !void
     {
@@ -626,35 +517,21 @@ pub const rdp_session_t = struct
             {
                 if (self.rdp_x11) |ardp_x11|
                 {
-                    const rect_reg = try get_rect_reg(self, rects, num_rects);
-                    defer self.cleanup_reg(rect_reg);
-                    const tile_reg = try get_tile_reg(self, tiles, num_tiles);
-                    defer self.cleanup_reg(tile_reg);
-                    var reg: c.pixman_region16_t = .{};
-                    c.pixman_region_init(&reg);
-                    defer c.pixman_region_fini(&reg);
-                    var clips: []c.XRectangle = &.{};
-                    defer self.allocator.free(clips);
-                    const pixman_bool = c.pixman_region_intersect(&reg,
-                            rect_reg, tile_reg);
-                    if (pixman_bool != 0)
-                    {
-                        clips = try get_clips_from_reg(self,
-                                bitmap_data.width, bitmap_data.height, &reg);
-                    }
                     if (ardp_x11.got_xshm)
                     {
                         try ardp_x11.draw_image_shm(awidth, aheight,
-                                0, 0, bitmap_data.width, bitmap_data.height,
+                                bitmap_data.dest_left, bitmap_data.dest_top,
+                                bitmap_data.width, bitmap_data.height,
                                 self.rfx_shm_info.shmid, self.rfx_ddata.ptr,
-                                clips);
+                                rects, num_rects);
 
                     }
                     else
                     {
                         try ardp_x11.draw_image(awidth, aheight,
-                                0, 0, bitmap_data.width, bitmap_data.height,
-                                self.rfx_ddata, clips);
+                                bitmap_data.dest_left, bitmap_data.dest_top,
+                                bitmap_data.width, bitmap_data.height,
+                                self.rfx_ddata, rects, num_rects);
                     }
                 }
             }

@@ -707,8 +707,8 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
-    fn init_box(box: *c.pixman_box16_t, x: isize, y: isize,
-            width: usize, height: usize) void
+    fn init_box(box: *c.XSegment, x: isize, y: isize,
+            width: isize, height: isize) void
     {
         box.x1 = @intCast(x);
         box.y1 = @intCast(y);
@@ -717,26 +717,30 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
-    // interect each clip with dst and draw the non null rects
+    // draw without shm, try to draw with minimum XPutImage pixels
+    // interect each clip with dst and draw the non nil rects
     fn draw_image_by_clip(self: *rdp_x11_t,
             src_width: c_uint, src_height: c_uint,
             dst_left: c_int, dst_top: c_int,
             dst_width: c_uint, dst_height: c_uint,
-            data: []u8, clips: []c.XRectangle, stride_bytes: c_int) !void
+            data: []u8, clips: [*]c.rfx_rect, num_clips: u32,
+            stride_bytes: c_int) !void
     {
-        var dest_rect: c.pixman_box16_t = undefined;
+        var dest_rect: c.XSegment = undefined;
         init_box(&dest_rect, dst_left, dst_top,
                 @min(src_width, dst_width),
                 @min(src_height, dst_height));
-        for (clips) |aclip|
+        var jndex: u32 = 0;
+        while (jndex < num_clips) : (jndex += 1)
         {
-            try self.session.logln_devel(log.LogLevel.debug, @src(),
+            const clip = clips[jndex];
+            try self.session.logln(log.LogLevel.debug, @src(),
                     "x {} y {} width {} height {}",
-                    .{aclip.x, aclip.y, aclip.width, aclip.height});
-            var clip_rect: c.pixman_box16_t = undefined;
-            init_box(&clip_rect, aclip.x, aclip.y,
-                    aclip.width, aclip.height);
-            var draw_rect: c.pixman_box16_t = undefined;
+                    .{clip.x, clip.y, clip.cx, clip.cy});
+            var clip_rect: c.XSegment = undefined;
+            init_box(&clip_rect, clip.x, clip.y, clip.cx, clip.cy);
+            var draw_rect: c.XSegment = undefined;
+            // intersect dest_rect and clip_rect
             draw_rect.x1 = @max(dest_rect.x1, clip_rect.x1);
             draw_rect.y1 = @max(dest_rect.y1, clip_rect.y1);
             draw_rect.x2 = @min(dest_rect.x2, clip_rect.x2);
@@ -794,12 +798,12 @@ pub const rdp_x11_t = struct
             src_width: c_uint, src_height: c_uint,
             dst_left: c_int, dst_top: c_int,
             dst_width: c_uint, dst_height: c_uint,
-            data: []u8, clips: []c.XRectangle) !void
+            data: []u8, clips: ?[*]c.rfx_rect, num_clips: i32) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
-                "clips.len {}", .{clips.len});
+                "num_clips {}", .{num_clips});
         const stride_bytes: c_int = @bitCast(src_width * 4);
-        if (clips.len < 1)
+        if (num_clips < 1)
         {
             const image = c.XCreateImage(self.display, self.visual,
                     self.depth, c.ZPixmap, 0, data.ptr,
@@ -817,9 +821,12 @@ pub const rdp_x11_t = struct
         }
         else
         {
-            try self.draw_image_by_clip(src_width, src_height,
-                    dst_left, dst_top, dst_width, dst_height,
-                    data, clips, stride_bytes);
+            if (clips) |aclips|
+            {
+                try self.draw_image_by_clip(src_width, src_height,
+                        dst_left, dst_top, dst_width, dst_height,
+                        data, aclips, @bitCast(num_clips), stride_bytes);
+            }
         }
     }
 
@@ -828,10 +835,11 @@ pub const rdp_x11_t = struct
             src_width: c_uint, src_height: c_uint,
             dst_left: c_int, dst_top: c_int,
             dst_width: c_uint, dst_height: c_uint,
-            shmid: c_int, shmaddr: [*]u8, clips: []c.XRectangle) !void
+            shmid: c_int, shmaddr: [*]u8,
+            clips: ?[*]c.rfx_rect, num_clips: i32) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
-                "clips.len {}", .{clips.len});
+                "num_clips {}", .{num_clips});
         var shminfo: c.XShmSegmentInfo = .{};
         shminfo.shmid = shmid;
         shminfo.shmaddr = shmaddr;
@@ -839,10 +847,27 @@ pub const rdp_x11_t = struct
                 self.depth, c.ZPixmap, shmaddr, &shminfo,
                 src_width, src_height);
         _ = c.XShmAttach(self.display, &shminfo);
-        if (clips.len > 0)
+        if (num_clips > 0)
         {
-            _ = c.XSetClipRectangles(self.display, self.gc, 0, 0,
-                    clips.ptr, @intCast(clips.len), c.Unsorted);
+            if (clips) |aclips|
+            {
+                // copy aclips to lclips
+                const clips_t = std.ArrayList(c.XRectangle);
+                var lclips = clips_t.init(self.allocator.*);
+                defer lclips.deinit();
+                var index: usize = 0;
+                while (index < num_clips) : (index += 1)
+                {
+                    var clip: c.XRectangle = .{};
+                    clip.x = @intCast(aclips[index].x);
+                    clip.y = @intCast(aclips[index].y);
+                    clip.width = @intCast(aclips[index].cx);
+                    clip.height = @intCast(aclips[index].cy);
+                    try lclips.append(clip);
+                }
+                _ = c.XSetClipRectangles(self.display, self.gc, 0, 0,
+                        lclips.items.ptr, num_clips, c.Unsorted);
+            }
         }
         _ = c.XShmPutImage(self.display, self.pixmap, self.gc, image,
                 0, 0, dst_left, dst_top, dst_width, dst_height, 0);
@@ -852,7 +877,7 @@ pub const rdp_x11_t = struct
         // GC still has clip for XCopyArea
         _ = c.XCopyArea(self.display, self.pixmap, self.window, self.gc,
                 dst_left, dst_top, dst_width, dst_height, dst_left, dst_top);
-        if (clips.len > 0)
+        if (num_clips > 0)
         {
             _ = c.XSetClipMask(self.display, self.gc, c.None);
         }
