@@ -25,6 +25,7 @@ pub const c = @cImport(
     @cInclude("librdpsnd.h");
     @cInclude("rfxcodec_decode.h");
     @cInclude("rlecodec_decode.h");
+    @cInclude("turbojpeg.h");
 });
 
 const SesError = error
@@ -32,6 +33,7 @@ const SesError = error
     RegUnion,
     RegZero,
     RfxDecoderCreate,
+    RfxDecode,
     LookupAddress,
     Connect,
     RdpcProcessServerData,
@@ -45,6 +47,7 @@ const SesError = error
     RdpsndInit,
     RdpsndCreate,
     BitmapUpdate,
+    JpgDecode,
 };
 
 //*****************************************************************************
@@ -77,7 +80,7 @@ const shm_info_t = struct
 {
 	shmid: c_int = -1,
 	bytes: u32 = 0,
-	ptr: ?*anyopaque = null,
+	ptr: ?[*]u8 = null,
 };
 
 const audio_t = struct
@@ -180,14 +183,18 @@ pub const rdp_session_t = struct
     rdp_x11: ?*rdpc_x11.rdp_x11_t = null,
     pulse: ?*rdpc_pulse.rdp_pulse_t = null,
 
-    // for set_surface_bits
+    // for set_surface_bits rfx
     rfx_decoder: ?*anyopaque = null,
-    rfx_ddata: []u8 = &.{},
+    rfx_decoder_awidth: u32 = 0,
+    rfx_decoder_aheight: u32 = 0,
     rfx_shm_info: shm_info_t = .{},
+
+    // for set_surface_bits jpg
+    jpg_decoder: ?*anyopaque = null,
+    jpg_shm_info: shm_info_t = .{},
 
     // for bitmap_update
     rle_tdata: []u8 = &.{},
-    rle_ddata: []u8 = &.{},
     rle_shm_info: shm_info_t = .{},
 
     //*************************************************************************
@@ -268,10 +275,9 @@ pub const rdp_session_t = struct
     //*************************************************************************
     pub fn delete(self: *rdp_session_t) void
     {
-        shm_info_deinit(&self.rle_shm_info);
-        self.allocator.free(self.rle_tdata);
-        shm_info_deinit(&self.rfx_shm_info);
-        self.cleanup_rfxdecoder();
+        self.cleanup_rle();
+        self.cleanup_rfx();
+        self.cleanup_jpg();
         if (self.rdp_x11) |ardp_x11|
         {
             ardp_x11.delete();
@@ -366,39 +372,43 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    fn bitmap_update(self: *rdp_session_t, bitmap_data: *c.bitmap_data_t) !void
+    fn check_rle(self: *rdp_session_t, width: u16, height: u16) !void
     {
-        try self.logln_devel(log.LogLevel.info, @src(),
-                "bits_per_pixel {}",
-                .{bitmap_data.bits_per_pixel});
         const size: u32 = @as(u32, 4) *
-                @as(u32, bitmap_data.width) *
-                @as(u32, bitmap_data.height);
-        if (size == 0)
-        {
-            return;
-        }
+                @as(u32, width) * @as(u32, height);
         if (size > self.rle_shm_info.bytes)
         {
             try self.logln(log.LogLevel.info, @src(),
                     "realloc shm and temp to {}", .{size});
             shm_info_deinit(&self.rle_shm_info);
             try shm_info_init(size, &self.rle_shm_info);
-            if (self.rle_shm_info.ptr) |aptr|
-            {
-                self.rle_ddata.ptr = @ptrCast(aptr);
-                self.rle_ddata.len = self.rle_shm_info.bytes;
-            }
-            else
+            if (self.rle_shm_info.ptr == null)
             {
                 return SesError.BitmapUpdate;
             }
             self.allocator.free(self.rle_tdata);
             self.rle_tdata = try self.allocator.alloc(u8, size);
         }
+    }
+
+    //*************************************************************************
+    fn cleanup_rle(self: *rdp_session_t) void
+    {
+        shm_info_deinit(&self.rle_shm_info);
+        self.allocator.free(self.rle_tdata);
+        self.rle_tdata = &.{};
+    }
+
+    //*************************************************************************
+    fn bitmap_update(self: *rdp_session_t, bitmap_data: *c.bitmap_data_t) !void
+    {
+        try self.logln_devel(log.LogLevel.info, @src(),
+                "bits_per_pixel {}",
+                .{bitmap_data.bits_per_pixel});
+        try self.check_rle(bitmap_data.width, bitmap_data.height);
         if (bitmap_data.bitmap_data) |abitmap_data|
         {
-            const rv = c.bitmap_decompress(abitmap_data, self.rle_ddata.ptr,
+            const rv = c.bitmap_decompress(abitmap_data, self.rle_shm_info.ptr,
                     bitmap_data.width, bitmap_data.height,
                     bitmap_data.bitmap_data_len,
                     bitmap_data.bits_per_pixel,
@@ -418,7 +428,8 @@ pub const rdp_session_t = struct
                             bitmap_data.width, bitmap_data.height,
                             bitmap_data.dest_left, bitmap_data.dest_top,
                             dest_width, dest_height,
-                            self.rle_shm_info.shmid, self.rle_ddata.ptr,
+                            self.rle_shm_info.shmid,
+                            self.rle_shm_info.ptr,
                             null, 0);
                 }
                 else
@@ -427,7 +438,7 @@ pub const rdp_session_t = struct
                             bitmap_data.width, bitmap_data.height,
                             bitmap_data.dest_left, bitmap_data.dest_top,
                             dest_width, dest_height,
-                            self.rle_ddata,
+                            self.rle_shm_info.ptr,
                             null, 0);
                 }
             }
@@ -435,62 +446,58 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    fn setup_rfxdecoder(self: *rdp_session_t, width: u16, height: u16) !void
+    fn check_rfx(self: *rdp_session_t, width: u16, height: u16) !void
     {
         const al: u16 = 63;
         const awidth: u16 = (width + al) & ~al;
         const aheight: u16 = (height + al) & ~al;
-        const rv = c.rfxcodec_decode_create_ex(awidth, aheight,
-                c.RFX_FORMAT_BGRA, c.RFX_FLAGS_SAFE, &self.rfx_decoder);
-        errdefer self.cleanup_rfxdecoder();
-        try self.logln_devel(log.LogLevel.info, @src(),
-                "rfxcodec_decode_create_ex rv {}", .{rv});
-        try err_if(rv != 0, SesError.RfxDecoderCreate);
-        const size = @as(u32, 4) * awidth * aheight;
-        try self.logln(log.LogLevel.info, @src(),
-                "create awidth {} aheight {} size {} {} al {}",
-                .{awidth, aheight, size, @TypeOf(size), al});
-        if (size > self.rfx_shm_info.bytes)
+        if ((self.rfx_decoder == null) or
+                (awidth > self.rfx_decoder_awidth) or
+                (aheight > self.rfx_decoder_aheight))
         {
-            shm_info_deinit(&self.rfx_shm_info);
-            try shm_info_init(size, &self.rfx_shm_info);
-        }
-        if (self.rfx_shm_info.ptr) |aptr|
-        {
-            self.rfx_ddata.ptr = @ptrCast(aptr);
-            self.rfx_ddata.len = self.rfx_shm_info.bytes;
-        }
-        else
-        {
-            return SesError.RfxDecoderCreate;
+            _ = c.rfxcodec_decode_destroy(self.rfx_decoder);
+            self.rfx_decoder = null;
+            const rv = c.rfxcodec_decode_create_ex(awidth, aheight,
+                    c.RFX_FORMAT_BGRA, c.RFX_FLAGS_SAFE, &self.rfx_decoder);
+            errdefer self.cleanup_rfx();
+            try self.logln_devel(log.LogLevel.info, @src(),
+                    "rfxcodec_decode_create_ex rv {}", .{rv});
+            try err_if(rv != 0, SesError.RfxDecoderCreate);
+            const size = @as(u32, 4) * awidth * aheight;
+            try self.logln(log.LogLevel.info, @src(),
+                    "create awidth {} aheight {} size {} al {}",
+                    .{awidth, aheight, size, al});
+            if (size > self.rfx_shm_info.bytes)
+            {
+                shm_info_deinit(&self.rfx_shm_info);
+                try shm_info_init(size, &self.rfx_shm_info);
+                if (self.rfx_shm_info.ptr == null)
+                {
+                    return SesError.RfxDecoderCreate;
+                }
+            }
+            self.rfx_decoder_awidth = awidth;
+            self.rfx_decoder_aheight = aheight;
         }
     }
 
     //*************************************************************************
-    fn cleanup_rfxdecoder(self: *rdp_session_t) void
+    fn cleanup_rfx(self: *rdp_session_t) void
     {
         if (self.rfx_decoder) |arfx_decoder|
         {
             _ = c.rfxcodec_decode_destroy(arfx_decoder);
             self.rfx_decoder = null;
         }
+        shm_info_deinit(&self.rfx_shm_info);
     }
 
     //*************************************************************************
-    fn set_surface_bits(self: *rdp_session_t,
+    fn set_surface_bits_rfx(self: *rdp_session_t,
             bitmap_data: *c.bitmap_data_ex_t) !void
     {
-        try self.logln_devel(log.LogLevel.info, @src(),
-                "bits_per_pixel {}",
-                .{bitmap_data.bits_per_pixel});
-        if (bitmap_data.codec_id != c.CODEC_ID_REMOTEFX)
-        {
-            return;
-        }
-        if (self.rfx_decoder == null)
-        {
-            try self.setup_rfxdecoder(bitmap_data.width, bitmap_data.height);
-        }
+        try self.logln_devel(log.LogLevel.info, @src(), "", .{});
+        try self.check_rfx(bitmap_data.width, bitmap_data.height);
         if (self.rfx_decoder) |arfx_decoder|
         {
             var rects: ?[*]c.rfx_rect = null;
@@ -498,44 +505,155 @@ pub const rdp_session_t = struct
             var tiles:  ?[*]c.rfx_tile = null;
             var num_tiles: i32 = 0;
             try self.logln_devel(log.LogLevel.info, @src(),
-                    "decode width {} height {} self.ddata.ptr {*}",
-                    .{bitmap_data.width, bitmap_data.height,
-                    self.rfx_ddata.ptr});
+                    "decode width {} height {}",
+                    .{bitmap_data.width, bitmap_data.height});
             const al: u16 = 63;
             const awidth: u16 = (bitmap_data.width + al) & ~al;
             const aheight: u16 = (bitmap_data.height + al) & ~al;
+            const ddata_ptr: ?[*]u8 = @ptrCast(self.rfx_shm_info.ptr);
             const rv = c.rfxcodec_decode_ex(arfx_decoder,
                     @ptrCast(bitmap_data.bitmap_data),
                     @bitCast(bitmap_data.bitmap_data_len),
-                    self.rfx_ddata.ptr, awidth, aheight,
+                    ddata_ptr, awidth, aheight,
                     awidth * 4, &rects, &num_rects,
                     &tiles, &num_tiles, 0);
             try self.logln_devel(log.LogLevel.info, @src(),
                     "rfxcodec_decode rv {} num_rects {} num_tiles {}",
                     .{rv, num_rects, num_tiles});
-            if (rv == 0)
+            try err_if(rv != 0, SesError.RfxDecode);
+            if (self.rdp_x11) |ardp_x11|
             {
-                if (self.rdp_x11) |ardp_x11|
+                const dst_width: u32 = bitmap_data.dest_right -
+                        bitmap_data.dest_left;
+                const dst_height: u32 = bitmap_data.dest_bottom -
+                        bitmap_data.dest_top;
+                if (ardp_x11.got_xshm)
                 {
-                    if (ardp_x11.got_xshm)
-                    {
-                        try ardp_x11.draw_image_shm(awidth, aheight,
-                                bitmap_data.dest_left, bitmap_data.dest_top,
-                                bitmap_data.width, bitmap_data.height,
-                                self.rfx_shm_info.shmid, self.rfx_ddata.ptr,
-                                rects, num_rects);
-
-                    }
-                    else
-                    {
-                        try ardp_x11.draw_image(awidth, aheight,
-                                bitmap_data.dest_left, bitmap_data.dest_top,
-                                bitmap_data.width, bitmap_data.height,
-                                self.rfx_ddata, rects, num_rects);
-                    }
+                    try ardp_x11.draw_image_shm(awidth, aheight,
+                            bitmap_data.dest_left, bitmap_data.dest_top,
+                            dst_width, dst_height,
+                            self.rfx_shm_info.shmid,
+                            self.rfx_shm_info.ptr,
+                            rects, num_rects);
+                }
+                else
+                {
+                    try ardp_x11.draw_image(awidth, aheight,
+                            bitmap_data.dest_left, bitmap_data.dest_top,
+                            dst_width, dst_height,
+                            self.rfx_shm_info.ptr,
+                            rects, num_rects);
                 }
             }
         }
+    }
+
+    //*************************************************************************
+    fn check_jpg(self: *rdp_session_t, width: u16, height: u16) !void
+    {
+        if (self.jpg_decoder == null)
+        {
+            try self.logln(log.LogLevel.info, @src(), "tjInitDecompress", .{});
+            self.jpg_decoder = c.tjInitDecompress();
+            try err_if(self.jpg_decoder == null, SesError.JpgDecode);
+        }
+        const size: u32 = @as(u32, 4) *
+                @as(u32, width) * @as(u32, height);
+        if (size > self.jpg_shm_info.bytes)
+        {
+            try self.logln(log.LogLevel.info, @src(),
+                    "realloc shm to {}", .{size});
+            shm_info_deinit(&self.jpg_shm_info);
+            try shm_info_init(size, &self.jpg_shm_info);
+            try err_if(self.jpg_shm_info.ptr == null, SesError.JpgDecode);
+        }
+    }
+
+    //*************************************************************************
+    fn cleanup_jpg(self: *rdp_session_t) void
+    {
+        if (self.jpg_decoder) |ajpg_decoder|
+        {
+            _ = c.tjDestroy(ajpg_decoder);
+            self.jpg_decoder = null;
+        }
+        shm_info_deinit(&self.jpg_shm_info);
+    }
+
+    //*************************************************************************
+    fn set_surface_bits_jpg(self: *rdp_session_t,
+            bitmap_data: *c.bitmap_data_ex_t) !void
+    {
+        try self.logln_devel(log.LogLevel.info, @src(), "", .{});
+        try self.check_jpg(bitmap_data.width, bitmap_data.height);
+        if (self.jpg_decoder) |ajpg_decoder|
+        {
+            // get info about jpeg image
+            var lwidth: i32 = 0;
+            var lheight: i32 = 0;
+            var jpeg_sub_samp: i32 = 0;
+            const header_ptr: [*]u8 = @ptrCast(bitmap_data.bitmap_data);
+            var header_bytes: usize = header_ptr[1];
+            header_bytes = (header_bytes << 8) | header_ptr[0];
+            const jpeg_ptr = header_ptr + header_bytes + 2;
+            const jpeg_len: usize = bitmap_data.bitmap_data_len - header_bytes;
+	        var rv = c.tjDecompressHeader2(ajpg_decoder,
+                    jpeg_ptr, jpeg_len,
+                    &lwidth, &lheight, &jpeg_sub_samp);
+            try self.logln_devel(log.LogLevel.info, @src(),
+                    "tjDecompressHeader2 rv {}", .{rv});
+            try err_if(rv != 0, SesError.JpgDecode);
+            try err_if(lwidth != bitmap_data.width, SesError.JpgDecode);
+            try err_if(lheight != bitmap_data.height, SesError.JpgDecode);
+            // decompress image
+	        rv = c.tjDecompress2(ajpg_decoder,
+                    jpeg_ptr, jpeg_len,
+                    self.jpg_shm_info.ptr,
+                    lwidth, lwidth * 4, lheight,
+                    c.TJPF_BGRX, 0);
+            try self.logln_devel(log.LogLevel.info, @src(),
+                    "tjDecompress2 rv {}", .{rv});
+            try err_if(rv != 0, SesError.JpgDecode);
+            if (self.rdp_x11) |ardp_x11|
+            {
+                const dst_width: u32 = bitmap_data.dest_right -
+                        bitmap_data.dest_left;
+                const dst_height: u32 = bitmap_data.dest_bottom -
+                        bitmap_data.dest_top;
+                if (ardp_x11.got_xshm)
+                {
+                    try ardp_x11.draw_image_shm(
+                            @bitCast(lwidth), @bitCast(lheight),
+                            bitmap_data.dest_left, bitmap_data.dest_top,
+                            dst_width, dst_height,
+                            self.jpg_shm_info.shmid,
+                            self.jpg_shm_info.ptr,
+                            null, 0);
+                }
+                else
+                {
+                    try ardp_x11.draw_image(
+                            @bitCast(lwidth), @bitCast(lheight),
+                            bitmap_data.dest_left, bitmap_data.dest_top,
+                            dst_width, dst_height,
+                            self.jpg_shm_info.ptr,
+                            null, 0);
+                }
+            }
+        }
+    }
+
+    //*************************************************************************
+    fn set_surface_bits(self: *rdp_session_t,
+            bitmap_data: *c.bitmap_data_ex_t) !void
+    {
+        try self.logln_devel(log.LogLevel.info, @src(), "", .{});
+        return switch (bitmap_data.codec_id)
+        {
+            c.CODEC_ID_JPEG => self.set_surface_bits_jpg(bitmap_data),
+            c.CODEC_ID_REMOTEFX => self.set_surface_bits_rfx(bitmap_data),
+            else => {},
+        };
     }
 
     //*************************************************************************
@@ -1241,8 +1359,8 @@ fn shm_info_init(size: usize, shm_info: *shm_info_t) !void
     shm_info.shmid = c.shmget(c.IPC_PRIVATE, size, c.IPC_CREAT | 0o600);
     if (shm_info.shmid == -1) return error.shmget;
     errdefer _ = c.shmctl(shm_info.shmid, c.IPC_RMID, null);
-    shm_info.ptr = c.shmat(shm_info.shmid, null, 0);
-    const err_ptr: *anyopaque = @ptrFromInt(std.math.maxInt(usize));
+    shm_info.ptr = @ptrCast(c.shmat(shm_info.shmid, null, 0));
+    const err_ptr: ?[*]u8 = @ptrFromInt(std.math.maxInt(usize));
     if (shm_info.ptr == err_ptr) return error.shmat;
     errdefer _ = c.shmdt(shm_info.ptr);
     shm_info.bytes = @truncate(size);

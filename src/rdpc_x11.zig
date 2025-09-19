@@ -166,6 +166,7 @@ pub const rdp_x11_t = struct
         {
             self.keymap[index] = .{.code = 0, .flags = .{0, 0}};
         }
+        // evdev map
         self.keymap[9] =   .{.code = 1,  .flags = .{0x0000, 0x8000}}; // Esc
         self.keymap[10] =  .{.code = 2,  .flags = .{0x0000, 0x8000}}; // 1
         self.keymap[11] =  .{.code = 3,  .flags = .{0x0000, 0x8000}}; // 2
@@ -734,7 +735,7 @@ pub const rdp_x11_t = struct
         while (jndex < num_clips) : (jndex += 1)
         {
             const clip = clips[jndex];
-            try self.session.logln(log.LogLevel.debug, @src(),
+            try self.session.logln_devel(log.LogLevel.debug, @src(),
                     "x {} y {} width {} height {}",
                     .{clip.x, clip.y, clip.cx, clip.cy});
             var clip_rect: c.XSegment = undefined;
@@ -798,7 +799,7 @@ pub const rdp_x11_t = struct
             src_width: c_uint, src_height: c_uint,
             dst_left: c_int, dst_top: c_int,
             dst_width: c_uint, dst_height: c_uint,
-            data: []u8, clips: ?[*]c.rfx_rect, num_clips: i32) !void
+            data: ?[*]u8, clips: ?[*]c.rfx_rect, num_clips: i32) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "num_clips {}", .{num_clips});
@@ -806,7 +807,7 @@ pub const rdp_x11_t = struct
         if (num_clips < 1)
         {
             const image = c.XCreateImage(self.display, self.visual,
-                    self.depth, c.ZPixmap, 0, data.ptr,
+                    self.depth, c.ZPixmap, 0, data,
                     src_width, src_height, 32, stride_bytes);
             if (image) |aimage|
             {
@@ -823,9 +824,15 @@ pub const rdp_x11_t = struct
         {
             if (clips) |aclips|
             {
-                try self.draw_image_by_clip(src_width, src_height,
-                        dst_left, dst_top, dst_width, dst_height,
-                        data, aclips, @bitCast(num_clips), stride_bytes);
+                if (data) |adata|
+                {
+                    var ldata: []u8 = undefined;
+                    ldata.ptr = adata;
+                    ldata.len = @as(u32, @intCast(stride_bytes)) * src_height;
+                    try self.draw_image_by_clip(src_width, src_height,
+                            dst_left, dst_top, dst_width, dst_height,
+                            ldata, aclips, @bitCast(num_clips), stride_bytes);
+                }
             }
         }
     }
@@ -835,7 +842,7 @@ pub const rdp_x11_t = struct
             src_width: c_uint, src_height: c_uint,
             dst_left: c_int, dst_top: c_int,
             dst_width: c_uint, dst_height: c_uint,
-            shmid: c_int, shmaddr: [*]u8,
+            shmid: c_int, shmaddr: ?[*]u8,
             clips: ?[*]c.rfx_rect, num_clips: i32) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),

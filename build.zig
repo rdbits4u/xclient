@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void
     xclient.linkSystemLibrary("xfixes");
     xclient.linkSystemLibrary("pixman-1");
     xclient.linkSystemLibrary("libpulse");
+    xclient.linkSystemLibrary("turbojpeg");
     xclient.addObjectFile(b.path("../librfxcodec/zig-out/lib/librfxdecode.a"));
     xclient.addObjectFile(b.path("../librlecodec/zig-out/lib/librledecode.a"));
     xclient.addObjectFile(b.path("../rdpc/zig-out/lib/librdpc.a"));
