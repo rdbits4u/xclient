@@ -51,7 +51,8 @@ pub const cliprdr_format_t = struct
                 var lslice: []u8 = undefined;
                 lslice.ptr = @ptrCast(aformat_name);
                 lslice.len = format.format_name_bytes;
-                self.format_name = try self.allocator.alloc(u8, format.format_name_bytes);
+                self.format_name = try self.allocator.alloc(u8,
+                        format.format_name_bytes);
                 std.mem.copyForwards(u8, self.format_name, lslice);
             }
         }
@@ -221,9 +222,11 @@ pub const rdp_x11_clip_t = struct
                 var utf16_as_u8: []u8 = undefined;
                 utf16_as_u8.ptr = @ptrCast(requested_format_data);
                 utf16_as_u8.len = requested_format_data_bytes;
-                var al = std.ArrayList(u32).init(self.allocator.*);
-                defer al.deinit();
-                try strings.utf16_as_u8_to_u32_array(utf16_as_u8, &al);
+                var al = try std.ArrayListUnmanaged(u32).initCapacity(
+                        self.allocator.*, 32);
+                defer al.deinit(self.allocator.*);
+                try strings.utf16_as_u8_to_u32_array(self.allocator,
+                        utf16_as_u8, &al);
                 var utf8 = try self.allocator.alloc(u8, al.items.len * 4 + 1);
                 defer self.allocator.free(utf8);
                 var len: usize = 0;
@@ -422,9 +425,10 @@ pub const rdp_x11_clip_t = struct
     fn process_target_utf8(self: *rdp_x11_clip_t, utf8: []u8) !void
     {
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
-        var al = std.ArrayList(u32).init(self.allocator.*);
-        defer al.deinit();
-        try strings.utf8_to_u32_array(utf8, &al);
+        var al = try std.ArrayListUnmanaged(u32).initCapacity(
+                self.allocator.*, 32);
+        defer al.deinit(self.allocator.*);
+        try strings.utf8_to_u32_array(self.allocator, utf8, &al);
         const utf16_as_u8 = try self.allocator.alloc(u8,
                 (al.items.len + 16) * 4);
         defer self.allocator.free(utf16_as_u8);

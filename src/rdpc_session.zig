@@ -455,20 +455,21 @@ pub const rdp_session_t = struct
                 (awidth > self.rfx_decoder_awidth) or
                 (aheight > self.rfx_decoder_aheight))
         {
+            try self.logln(log.LogLevel.info, @src(),
+                    "rfxcodec_decode_create_ex: awidth {} aheight {}",
+                    .{awidth, aheight});
             _ = c.rfxcodec_decode_destroy(self.rfx_decoder);
             self.rfx_decoder = null;
             const rv = c.rfxcodec_decode_create_ex(awidth, aheight,
                     c.RFX_FORMAT_BGRA, c.RFX_FLAGS_SAFE, &self.rfx_decoder);
             errdefer self.cleanup_rfx();
-            try self.logln_devel(log.LogLevel.info, @src(),
-                    "rfxcodec_decode_create_ex rv {}", .{rv});
             try err_if(rv != 0, SesError.RfxDecoderCreate);
             const size = @as(u32, 4) * awidth * aheight;
-            try self.logln(log.LogLevel.info, @src(),
-                    "create awidth {} aheight {} size {} al {}",
-                    .{awidth, aheight, size, al});
             if (size > self.rfx_shm_info.bytes)
             {
+                try self.logln(log.LogLevel.info, @src(),
+                        "realloc shm to {} awidth {} aheight {}",
+                        .{size, awidth, aheight});
                 shm_info_deinit(&self.rfx_shm_info);
                 try shm_info_init(size, &self.rfx_shm_info);
                 if (self.rfx_shm_info.ptr == null)

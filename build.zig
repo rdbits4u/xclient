@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
+//*****************************************************************************
 pub fn build(b: *std.Build) void
 {
     // build options
@@ -11,13 +13,8 @@ pub fn build(b: *std.Build) void
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     // xclient
-    const xclient = b.addExecutable(.{
-        .name = "xclient",
-        .root_source_file = b.path("src/xclient.zig"),
-        .target = target,
-        .optimize = optimize,
-        .strip = do_strip,
-    });
+    const xclient = myAddExecutable(b, "xclient", target,optimize, do_strip);
+    xclient.root_module.root_source_file = b.path("src/xclient.zig");
     xclient.linkLibC();
     xclient.addIncludePath(b.path("../common"));
     xclient.addIncludePath(b.path("../rdpc/include"));
@@ -52,6 +49,7 @@ pub fn build(b: *std.Build) void
     b.installArtifact(xclient);
 }
 
+//*****************************************************************************
 fn setExtraLibraryPaths(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void
 {
     if (target.result.cpu.arch == std.Target.Cpu.Arch.x86)
@@ -60,4 +58,29 @@ fn setExtraLibraryPaths(compile: *std.Build.Step.Compile, target: std.Build.Reso
         // of /usr/lib/i386-linux-gnu
         compile.addLibraryPath(.{.cwd_relative = "/usr/lib/i386-linux-gnu/"});
     }
+}
+
+//*****************************************************************************
+fn myAddExecutable(b: *std.Build, name: []const u8,
+        target: std.Build.ResolvedTarget,
+        optimize: std.builtin.OptimizeMode,
+        do_strip: bool) *std.Build.Step.Compile
+{
+    if ((builtin.zig_version.major == 0) and (builtin.zig_version.minor < 15))
+    {
+        return b.addExecutable(.{
+            .name = name,
+            .target = target,
+            .optimize = optimize,
+            .strip = do_strip,
+        });
+    }
+    return b.addExecutable(.{
+        .name = name,
+        .root_module = b.addModule(name, .{
+            .target = target,
+            .optimize = optimize,
+            .strip = do_strip,
+        }),
+    });
 }
