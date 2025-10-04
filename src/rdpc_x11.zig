@@ -859,9 +859,9 @@ pub const rdp_x11_t = struct
             if (clips) |aclips|
             {
                 // copy aclips to lclips
-                const clips_t = std.ArrayList(c.XRectangle);
-                var lclips = clips_t.init(self.allocator.*);
-                defer lclips.deinit();
+                const clips_t = std.ArrayListUnmanaged(c.XRectangle);
+                var lclips = try clips_t.initCapacity(self.allocator.*, 32);
+                defer lclips.deinit(self.allocator.*);
                 var index: usize = 0;
                 while (index < num_clips) : (index += 1)
                 {
@@ -870,7 +870,7 @@ pub const rdp_x11_t = struct
                     clip.y = @intCast(aclips[index].y);
                     clip.width = @intCast(aclips[index].cx);
                     clip.height = @intCast(aclips[index].cy);
-                    try lclips.append(clip);
+                    try lclips.append(self.allocator.*, clip);
                 }
                 _ = c.XSetClipRectangles(self.display, self.gc, 0, 0,
                         lclips.items.ptr, num_clips, c.Unsorted);

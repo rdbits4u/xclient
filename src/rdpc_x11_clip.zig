@@ -68,7 +68,7 @@ pub const cliprdr_format_t = struct
 
 };
 
-const cliprdr_formats_t = std.ArrayList(*cliprdr_format_t);
+const cliprdr_formats_t = std.ArrayListUnmanaged(*cliprdr_format_t);
 
 pub const rdp_x11_clip_t = struct
 {
@@ -100,7 +100,7 @@ pub const rdp_x11_clip_t = struct
             rdp_x11: *rdpc_x11.rdp_x11_t) !*rdp_x11_clip_t
     {
         const self = try allocator.create(rdp_x11_clip_t);
-        const formats = cliprdr_formats_t.init(allocator.*);
+        const formats = try cliprdr_formats_t.initCapacity(allocator.*, 32);
         self.* = .{.allocator = allocator, .session = session,
                 .rdp_x11 = rdp_x11, .formats = formats};
         return self;
@@ -113,7 +113,7 @@ pub const rdp_x11_clip_t = struct
         {
             acliprdr_format.delete();
         }
-        self.formats.deinit();
+        self.formats.deinit(self.allocator.*);
         self.allocator.destroy(self);
     }
 
@@ -152,7 +152,7 @@ pub const rdp_x11_clip_t = struct
             const cliprdr_format = try cliprdr_format_t.create_from_format(
                     self.allocator, format);
             errdefer cliprdr_format.delete();
-            const aformat = try self.formats.addOne();
+            const aformat = try self.formats.addOne(self.allocator.*);
             aformat.* = cliprdr_format;
             if (format.format_id == c.CF_UNICODETEXT)
             {
@@ -395,13 +395,14 @@ pub const rdp_x11_clip_t = struct
     {
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
         const x11 = self.rdp_x11;
-        var al = std.ArrayList(c.cliprdr_format_t).init(self.allocator.*);
-        defer al.deinit();
+        var al = try std.ArrayListUnmanaged(c.cliprdr_format_t).initCapacity(
+                self.allocator.*, 32);
+        defer al.deinit(self.allocator.*);
         for (targets) |atom|
         {
             if (atom == x11.utf8_atom)
             {
-                var format = try al.addOne();
+                var format = try al.addOne(self.allocator.*);
                 format.* = .{};
                 format.format_id = c.CF_UNICODETEXT;
             }
@@ -481,8 +482,9 @@ pub const rdp_x11_clip_t = struct
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is targets_atom", .{});
-            var atom_list = std.ArrayList(c.Atom).init(self.allocator.*);
-            defer atom_list.deinit();
+            var atom_list = try std.ArrayListUnmanaged(c.Atom).initCapacity(
+                    self.allocator.*, 32);
+            defer atom_list.deinit(self.allocator.*);
             try com.get_window_property(c.Atom, &atom_list,
                     event.requestor, event.property, c.XA_ATOM, 32);
             _ = c.XDeleteProperty(x11.display, event.requestor,
@@ -493,8 +495,9 @@ pub const rdp_x11_clip_t = struct
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is utf8_atom", .{});
-            var utf8_list = std.ArrayList(u8).init(self.allocator.*);
-            defer utf8_list.deinit();
+            var utf8_list = try std.ArrayListUnmanaged(u8).initCapacity(
+                    self.allocator.*, 32);
+            defer utf8_list.deinit(self.allocator.*);
             try com.get_window_property(u8, &utf8_list,
                     event.requestor, event.property, x11.utf8_atom, 8);
             _ = c.XDeleteProperty(x11.display, event.requestor,

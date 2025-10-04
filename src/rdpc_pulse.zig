@@ -366,8 +366,8 @@ fn sample_spec_from_format(sample_spec: *c.pa_sample_spec,
 }
 
 //*****************************************************************************
-fn cb_pa_context_state(context: ?*c.pa_context,
-        userdata: ?*anyopaque) callconv(.C) void
+export fn cb_pa_context_state(context: ?*c.pa_context,
+        userdata: ?*anyopaque) void
 {
     const pa_mainloop: ?*c.pa_threaded_mainloop = @ptrCast(userdata);
     const state = c.pa_context_get_state(context);
@@ -380,8 +380,8 @@ fn cb_pa_context_state(context: ?*c.pa_context,
 }
 
 //*****************************************************************************
-fn cb_pa_pulse_stream_success(stream: ?*c.pa_stream, success: c_int,
-        userdata: ?*anyopaque) callconv(.C) void
+export fn cb_pa_pulse_stream_success(stream: ?*c.pa_stream, success: c_int,
+        userdata: ?*anyopaque) void
 {
     _ = stream;
     _ = success;
@@ -390,8 +390,8 @@ fn cb_pa_pulse_stream_success(stream: ?*c.pa_stream, success: c_int,
 }
 
 //*****************************************************************************
-fn cb_pa_stream_state(stream: ?*c.pa_stream,
-        userdata: ?*anyopaque) callconv(.C) void
+export fn cb_pa_stream_state(stream: ?*c.pa_stream,
+        userdata: ?*anyopaque) void
 {
     const pa_mainloop: ?*c.pa_threaded_mainloop = @ptrCast(userdata);
     const state = c.pa_stream_get_state(stream);
@@ -404,8 +404,8 @@ fn cb_pa_stream_state(stream: ?*c.pa_stream,
 }
 
 //*****************************************************************************
-fn cb_pa_stream_request(stream: ?*c.pa_stream, length: usize,
-        userdata: ?*anyopaque) callconv(.C) void
+export fn cb_pa_stream_request(stream: ?*c.pa_stream, length: usize,
+        userdata: ?*anyopaque) void
 {
     _ = stream;
     //std.debug.print("cb_pa_stream_request: length {}\n", .{length});

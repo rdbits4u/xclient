@@ -40,7 +40,7 @@ pub const rdp_x11_common_t = struct
     //*************************************************************************
     // read a window property into a list
     pub fn get_window_property(self: *rdp_x11_common_t, comptime T: type,
-            al: *std.ArrayList(T), window: c.Window, property: c.Atom,
+            al: *std.ArrayListUnmanaged(T), window: c.Window, property: c.Atom,
             want_type: c.Atom, want_format: c_int) !void
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
@@ -70,7 +70,7 @@ pub const rdp_x11_common_t = struct
                     var slice: []T = undefined;
                     slice.ptr = @alignCast(@ptrCast(aprop));
                     slice.len = lnitems;
-                    try al.appendSlice(slice);
+                    try al.appendSlice(self.allocator.*, slice);
                 }
             }
             if ((lbytes_after < 1) or (lformat < 1))

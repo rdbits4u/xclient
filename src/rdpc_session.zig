@@ -161,7 +161,7 @@ pub const rdpsnd_format_t = struct
 
 };
 
-const rdpsnd_formats_t = std.ArrayList(*rdpsnd_format_t);
+const rdpsnd_formats_t = std.ArrayListUnmanaged(*rdpsnd_format_t);
 
 pub const rdp_session_t = struct
 {
@@ -263,7 +263,7 @@ pub const rdp_session_t = struct
         svc.channels[chan_index].user = self;
         svc.channels[chan_index].process_data = cb_svc_rdpsnd_process_data;
         gcc_net.channelCount += 1;
-        const formats = rdpsnd_formats_t.init(allocator.*);
+        const formats = try rdpsnd_formats_t.initCapacity(allocator.*, 32);
 
         // init self
         self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
@@ -300,7 +300,7 @@ pub const rdp_session_t = struct
         {
             ardpsnd_format.delete();
         }
-        self.formats.deinit();
+        self.formats.deinit(self.allocator.*);
         self.allocator.destroy(self);
     }
 
@@ -719,7 +719,7 @@ pub const rdp_session_t = struct
             try err_if(address_list.addrs.len < 1, SesError.LookupAddress);
             address = address_list.addrs[0];
         }
-        try self.logln(log.LogLevel.info, @src(), "connecting to {}",
+        try self.logln_devel(log.LogLevel.info, @src(), "connecting to {any}",
                 .{address});
         self.sck = try posix.socket(address.any.family, tpe, 0);
         // set non blocking
@@ -1223,8 +1223,8 @@ pub const rdp_session_t = struct
                 "dgram_port {} version {} block_no {} num_formats {}",
                 .{channel_id, flags, volume, pitch, dgram_port, version,
                 block_no, num_formats});
-        var sformats = std.ArrayList(c.rdpsnd_format_t).init(self.allocator.*);
-        defer sformats.deinit();
+        var sformats = try std.ArrayListUnmanaged(c.rdpsnd_format_t).initCapacity(self.allocator.*, 32);
+        defer sformats.deinit(self.allocator.*);
         if (self.pulse == null)
         {
             const pulse = rdpc_pulse.rdp_pulse_t.create(self,
@@ -1258,9 +1258,9 @@ pub const rdp_session_t = struct
                 const format_ok = try apulse.check_format(rdpsnd_format);
                 if (format_ok)
                 {
-                    try sformats.append(format.*);
+                    try sformats.append(self.allocator.*, format.*);
                     // make a copy
-                    const aformat = try self.formats.addOne();
+                    const aformat = try self.formats.addOne(self.allocator.*);
                     aformat.* = rdpsnd_format;
                 }
                 else
@@ -1463,7 +1463,7 @@ fn can_send(asck: i32) !bool
 //*****************************************************************************
 // callback
 // int (*log_msg)(struct rdpc_t* rdpc, const char* msg);
-fn cb_rdpc_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
+export fn cb_rdpc_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) c_int
 {
     if (msg) |amsg|
     {
@@ -1485,8 +1485,8 @@ fn cb_rdpc_log_msg(rdpc: ?*c.rdpc_t, msg: ?[*:0]const u8) callconv(.C) c_int
 //*****************************************************************************
 // callback
 // int (*send_to_server)(struct rdpc_t* rdpc, void* data, int bytes);
-fn cb_rdpc_send_to_server(rdpc: ?*c.rdpc_t,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+export fn cb_rdpc_send_to_server(rdpc: ?*c.rdpc_t,
+        data: ?*anyopaque, bytes: u32) c_int
 {
     var rv: c_int = c.LIBRDPC_ERROR_PARSE;
     if (rdpc) |ardpc|
@@ -1513,8 +1513,8 @@ fn cb_rdpc_send_to_server(rdpc: ?*c.rdpc_t,
 // callback
 // int (*bitmap_update)(struct rdpc_t* rdpc,
 //                      struct bitmap_data_t* bitmap_data);
-fn cb_rdpc_bitmap_update(rdpc: ?*c.rdpc_t,
-        bitmap_data: ?*c.bitmap_data_t) callconv(.C) c_int
+export fn cb_rdpc_bitmap_update(rdpc: ?*c.rdpc_t,
+        bitmap_data: ?*c.bitmap_data_t) c_int
 {
     var rv: c_int = c.LIBRDPC_ERROR_PARSE;
     if (rdpc) |ardpc|
@@ -1538,8 +1538,8 @@ fn cb_rdpc_bitmap_update(rdpc: ?*c.rdpc_t,
 // callback
 // int (*set_surface_bits)(struct rdpc_t* rdpc,
 //                         struct bitmap_data_ex_t* bitmap_data);
-fn cb_rdpc_set_surface_bits(rdpc: ?*c.rdpc_t,
-        bitmap_data: ?*c.bitmap_data_ex_t) callconv(.C) c_int
+export fn cb_rdpc_set_surface_bits(rdpc: ?*c.rdpc_t,
+        bitmap_data: ?*c.bitmap_data_ex_t) c_int
 {
     var rv: c_int = c.LIBRDPC_ERROR_PARSE;
     if (rdpc) |ardpc|
@@ -1563,8 +1563,8 @@ fn cb_rdpc_set_surface_bits(rdpc: ?*c.rdpc_t,
 // callback
 // int (*set_surface_bits)(struct rdpc_t* rdpc,
 //                         uint16_t frame_action, uint32_t frame_id);
-fn cb_rdpc_frame_marker(rdpc: ?*c.rdpc_t,
-        frame_action: u16, frame_id: u32) callconv(.C) c_int
+export fn cb_rdpc_frame_marker(rdpc: ?*c.rdpc_t,
+        frame_action: u16, frame_id: u32) c_int
 {
     var rv: c_int = c.LIBRDPC_ERROR_PARSE;
     if (rdpc) |ardpc|
@@ -1585,8 +1585,8 @@ fn cb_rdpc_frame_marker(rdpc: ?*c.rdpc_t,
 // callback
 // int (*pointer_update)(struct rdpc_t* rdpc,
 //                       struct pointer_t* pointer);
-fn cb_rdpc_pointer_update(rdpc: ?*c.rdpc_t,
-        pointer: ?*c.pointer_t) callconv(.C) c_int
+export fn cb_rdpc_pointer_update(rdpc: ?*c.rdpc_t,
+        pointer: ?*c.pointer_t) c_int
 {
     var rv: c_int = c.LIBRDPC_ERROR_PARSE;
     if (rdpc) |ardpc|
@@ -1610,7 +1610,7 @@ fn cb_rdpc_pointer_update(rdpc: ?*c.rdpc_t,
 // callback
 // int (*pointer_cached)(struct rdpc_t* rdpc,
 //                       uint16_t cache_index);
-fn cb_rdpc_pointer_cached(rdpc: ?*c.rdpc_t, cache_index: u16) callconv(.C) c_int
+export fn cb_rdpc_pointer_cached(rdpc: ?*c.rdpc_t, cache_index: u16) c_int
 {
     var rv: c_int = c.LIBRDPC_ERROR_PARSE;
     if (rdpc) |ardpc|
@@ -1631,8 +1631,8 @@ fn cb_rdpc_pointer_cached(rdpc: ?*c.rdpc_t, cache_index: u16) callconv(.C) c_int
 // callback
 // int (*channel)(struct rdpc_t* rdpc, uint16_t channel_id,
 //                void* data, uint32_t bytes);
-fn cb_rdpc_channel(rdpc: ?*c.rdpc_t, channel_id: u16,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+export fn cb_rdpc_channel(rdpc: ?*c.rdpc_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) c_int
 {
     var rv: c_int = c.LIBRDPC_ERROR_CHANNEL;
     if (rdpc) |ardpc|
@@ -1654,8 +1654,8 @@ fn cb_rdpc_channel(rdpc: ?*c.rdpc_t, channel_id: u16,
 //*****************************************************************************
 // callback
 // int (*log_msg)(struct svc_channels_t* svc, const char* msg);
-fn cb_svc_log_msg(svc: ?*c.svc_channels_t,
-        msg: ?[*:0]const u8) callconv(.C) c_int
+export fn cb_svc_log_msg(svc: ?*c.svc_channels_t,
+        msg: ?[*:0]const u8) c_int
 {
     if (msg) |amsg|
     {
@@ -1679,9 +1679,9 @@ fn cb_svc_log_msg(svc: ?*c.svc_channels_t,
 // int (*send_data)(struct svc_channels_t* svc, uint16_t channel_id,
 //                  uint32_t total_bytes, uint32_t flags,
 //                  void* data, uint32_t bytes);
-fn cb_svc_send_data(svc: ?*c.svc_channels_t, channel_id: u16,
+export fn cb_svc_send_data(svc: ?*c.svc_channels_t, channel_id: u16,
         total_bytes: u32, flags: u32, data: ?*anyopaque,
-        bytes: u32) callconv(.C) c_int
+        bytes: u32) c_int
 {
     if (svc) |asvc|
     {
@@ -1706,8 +1706,8 @@ fn cb_svc_send_data(svc: ?*c.svc_channels_t, channel_id: u16,
 //*****************************************************************************
 // callback
 // int (*log_msg)(struct cliprdr_t* cliprdr, const char* msg);
-fn cb_cliprdr_log_msg(cliprdr: ?*c.cliprdr_t,
-        msg: ?[*:0]const u8) callconv(.C) c_int
+export fn cb_cliprdr_log_msg(cliprdr: ?*c.cliprdr_t,
+        msg: ?[*:0]const u8) c_int
 {
     if (msg) |amsg|
     {
@@ -1730,8 +1730,8 @@ fn cb_cliprdr_log_msg(cliprdr: ?*c.cliprdr_t,
 // callback
 // int (*send_data)(struct cliprdr_t* cliprdr, uint16_t channel_id,
 //                  void* data, uint32_t bytes);
-fn cb_cliprdr_send_data(cliprdr: ?*c.cliprdr_t, channel_id: u16,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+export fn cb_cliprdr_send_data(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) c_int
 {
     if (cliprdr) |acliprdr|
     {
@@ -1755,8 +1755,8 @@ fn cb_cliprdr_send_data(cliprdr: ?*c.cliprdr_t, channel_id: u16,
 // callback
 // int (*ready)(struct cliprdr_t* cliprdr, uint32_t version,
 //              uint32_t general_flags);
-fn cb_cliprdr_ready(cliprdr: ?*c.cliprdr_t, channel_id: u16,
-        version: u32, general_flags: u32) callconv(.C) c_int
+export fn cb_cliprdr_ready(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        version: u32, general_flags: u32) c_int
 {
     if (cliprdr) |acliprdr|
     {
@@ -1776,9 +1776,9 @@ fn cb_cliprdr_ready(cliprdr: ?*c.cliprdr_t, channel_id: u16,
 // int (*format_list)(struct cliprdr_t* cliprdr, uint16_t channel_id,
 //                    uint16_t msg_flags, uint32_t num_formats,
 //                    struct cliprdr_format_t* formats);
-fn cb_cliprdr_format_list(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+export fn cb_cliprdr_format_list(cliprdr: ?*c.cliprdr_t, channel_id: u16,
         msg_flags: u16, num_formats: u32,
-        formats: ?[*]c.cliprdr_format_t) callconv(.C) c_int
+        formats: ?[*]c.cliprdr_format_t) c_int
 {
     if (cliprdr) |acliprdr|
     {
@@ -1801,8 +1801,8 @@ fn cb_cliprdr_format_list(cliprdr: ?*c.cliprdr_t, channel_id: u16,
 // callback
 // int (*format_list_response)(struct cliprdr_t* cliprdr,
 //                             uint16_t channel_id, uint16_t msg_flags);
-fn cb_cliprdr_format_list_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
-        msg_flags: u16) callconv(.C) c_int
+export fn cb_cliprdr_format_list_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        msg_flags: u16) c_int
 {
     if (cliprdr) |acliprdr|
     {
@@ -1821,8 +1821,8 @@ fn cb_cliprdr_format_list_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
 // callback
 // int (*data_request)(struct cliprdr_t* cliprdr, uint16_t channel_id,
 //                     uint32_t requested_format_id);
-fn cb_cliprdr_data_request(cliprdr: ?*c.cliprdr_t, channel_id: u16,
-        requested_format_id: u32) callconv(.C) c_int
+export fn cb_cliprdr_data_request(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+        requested_format_id: u32) c_int
 {
     if (cliprdr) |acliprdr|
     {
@@ -1843,9 +1843,9 @@ fn cb_cliprdr_data_request(cliprdr: ?*c.cliprdr_t, channel_id: u16,
 // int (*data_response)(struct cliprdr_t* cliprdr, uint16_t channel_id,
 //                      uint16_t msg_flags, void* requested_format_data,
 //                      uint32_t requested_format_data_bytes);
-fn cb_cliprdr_data_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
+export fn cb_cliprdr_data_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
         msg_flags: u16, requested_format_data: ?*anyopaque,
-        requested_format_data_bytes: u32) callconv(.C) c_int
+        requested_format_data_bytes: u32) c_int
 {
     if (cliprdr) |acliprdr|
     {
@@ -1869,8 +1869,8 @@ fn cb_cliprdr_data_response(cliprdr: ?*c.cliprdr_t, channel_id: u16,
 // callback
 // int (*process_data)(struct svc_t* svc, uint16_t channel_id,
 //                     void* data, uint32_t bytes);
-fn cb_svc_cliprdr_process_data(svc: ?*c.svc_t, channel_id: u16,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+export fn cb_svc_cliprdr_process_data(svc: ?*c.svc_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) c_int
 {
     if (svc) |asvc|
     {
@@ -1891,8 +1891,8 @@ fn cb_svc_cliprdr_process_data(svc: ?*c.svc_t, channel_id: u16,
 //*****************************************************************************
 // callback
 // int (*log_msg)(struct rdpsnd_t* rdpsnd, const char* msg);
-fn cb_rdpsnd_log_msg(rdpsnd: ?*c.rdpsnd_t,
-        msg: ?[*:0]const u8) callconv(.C) c_int
+export fn cb_rdpsnd_log_msg(rdpsnd: ?*c.rdpsnd_t,
+        msg: ?[*:0]const u8) c_int
 {
     if (msg) |amsg|
     {
@@ -1915,8 +1915,8 @@ fn cb_rdpsnd_log_msg(rdpsnd: ?*c.rdpsnd_t,
 // callback
 // int (*send_data)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
 //                  void* data, uint32_t bytes);
-fn cb_rdpsnd_send_data(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+export fn cb_rdpsnd_send_data(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) c_int
 {
     if (rdpsnd) |ardpsnd|
     {
@@ -1940,8 +1940,8 @@ fn cb_rdpsnd_send_data(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
 //*****************************************************************************
 // callback
 // int (*process_close)(struct rdpsnd_t* rdpsnd, uint16_t channel_id);
-fn cb_rdpsnd_process_close(rdpsnd: ?*c.rdpsnd_t,
-        channel_id: u16) callconv(.C) c_int
+export fn cb_rdpsnd_process_close(rdpsnd: ?*c.rdpsnd_t,
+        channel_id: u16) c_int
 {
     if (rdpsnd) |ardpsnd|
     {
@@ -1961,9 +1961,9 @@ fn cb_rdpsnd_process_close(rdpsnd: ?*c.rdpsnd_t,
 // int (*process_wave)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
 //                     uint16_t time_stamp, uint16_t format_no,
 //                     uint8_t block_no, void* data, uint32_t bytes);
-fn cb_rdpsnd_process_wave(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+export fn cb_rdpsnd_process_wave(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
         time_stamp: u16, format_no: u16, block_no: u8,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+        data: ?*anyopaque, bytes: u32) c_int
 {
     if (rdpsnd) |ardpsnd|
     {
@@ -1990,9 +1990,9 @@ fn cb_rdpsnd_process_wave(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
 // int (*process_training)(struct rdpsnd_t* rdpsnd, uint16_t channel_id,
 //                         uint16_t time_stamp, uint16_t pack_size,
 //                         void* data, uint32_t bytes);
-fn cb_rdpsnd_process_training(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+export fn cb_rdpsnd_process_training(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
         time_stamp: u16, pack_size: u16,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+        data: ?*anyopaque, bytes: u32) c_int
 {
     if (rdpsnd) |ardpsnd|
     {
@@ -2015,10 +2015,10 @@ fn cb_rdpsnd_process_training(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
 //                        uint32_t pitch, uint16_t dgram_port,
 //                        uint16_t version, uint8_t block_no,
 //                        uint16_t num_formats, struct format_t* formats);
-fn cb_rdpsnd_process_formats(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
+export fn cb_rdpsnd_process_formats(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
         flags: u32, volume: u32, pitch: u32, dgram_port: u16,
         version: u16, block_no: u8, num_formats: u16,
-        formats: ?[*]c.rdpsnd_format_t) callconv(.C) c_int
+        formats: ?[*]c.rdpsnd_format_t) c_int
 {
     if (rdpsnd) |ardpsnd|
     {
@@ -2042,8 +2042,8 @@ fn cb_rdpsnd_process_formats(rdpsnd: ?*c.rdpsnd_t, channel_id: u16,
 // callback
 // int (*process_data)(struct svc_t* svc, uint16_t channel_id,
 //                     void* data, uint32_t bytes);
-fn cb_svc_rdpsnd_process_data(svc: ?*c.svc_t, channel_id: u16,
-        data: ?*anyopaque, bytes: u32) callconv(.C) c_int
+export fn cb_svc_rdpsnd_process_data(svc: ?*c.svc_t, channel_id: u16,
+        data: ?*anyopaque, bytes: u32) c_int
 {
     if (svc) |asvc|
     {

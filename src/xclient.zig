@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const hexdump = @import("hexdump");
 const strings = @import("strings");
 const log = @import("log");
 const rdpc_session = @import("rdpc_session.zig");
@@ -22,11 +21,9 @@ pub inline fn err_if(b: bool, err: MyError) !void
 }
 
 //*****************************************************************************
-fn show_command_line_args() !void
+fn show_command_line_args1(writer: anytype) !void
 {
     const app_name = std.mem.sliceTo(std.os.argv[0], 0);
-    const stdout = std.io.getStdOut();
-    const writer = stdout.writer();
     const vstr = builtin.zig_version_string;
     try writer.print("{s} - A sample application for librdpc\n", .{app_name});
     try writer.print("built with zig version {s}\n", .{vstr});
@@ -45,6 +42,24 @@ fn show_command_line_args() !void
     try writer.print("  {s} [aa:bb:cc:dd]\n", .{app_name});
     try writer.print("  {s} [aa:bb:cc:dd]:3390\n", .{app_name});
     try writer.print("  {s} /tmp/xrdp.socket\n", .{app_name});
+}
+
+//*****************************************************************************
+fn show_command_line_args() !void
+{
+    if ((builtin.zig_version.major == 0) and (builtin.zig_version.minor < 15))
+    {
+        const stdout = std.io.getStdOut();
+        const writer = stdout.writer();
+        try show_command_line_args1(writer);
+        return;
+    }
+    var stdout_buffer: [32]u8 = undefined;
+    const stdout = std.fs.File.stdout();
+    var stdout_writer = stdout.writer(&stdout_buffer);
+    const writer = &stdout_writer.interface;
+    try show_command_line_args1(writer);
+    try writer.flush();
 }
 
 //*****************************************************************************
@@ -150,7 +165,6 @@ fn process_args(settings: *c.rdpc_settings_t,
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
             strings.copyZ(&settings.username, slice_arg);
-            try hexdump.printHexDump(0, &settings.username);
         }
         else if (std.mem.eql(u8, slice_arg, "-d"))
         {
@@ -286,13 +300,13 @@ fn create_rdpc_session(rdp_connect: *rdpc_session.rdp_connect_t)
 }
 
 //*****************************************************************************
-fn term_sig(_: c_int) callconv(.C) void
+export fn term_sig(_: c_int) void
 {
     rdpc_session.fifo_set(&rdpc_session.g_term) catch return;
 }
 
 //*****************************************************************************
-fn pipe_sig(_: c_int) callconv(.C) void
+export fn pipe_sig(_: c_int) void
 {
 }
 
@@ -303,7 +317,9 @@ fn setup_signals() !void
     errdefer posix.close(rdpc_session.g_term[0]);
     errdefer posix.close(rdpc_session.g_term[1]);
     var sa: posix.Sigaction = undefined;
-    sa.mask = posix.empty_sigset;
+    sa.mask =
+    if ((builtin.zig_version.major == 0) and (builtin.zig_version.minor < 15))
+            posix.empty_sigset else posix.sigemptyset();
     sa.flags = 0;
     sa.handler = .{ .handler = term_sig };
     if ((builtin.zig_version.major == 0) and (builtin.zig_version.minor == 13))
