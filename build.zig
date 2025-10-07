@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void
     xclient.addIncludePath(b.path("../common"));
     xclient.addIncludePath(b.path("../rdpc/include"));
     xclient.addIncludePath(b.path("../svc/include"));
+    xclient.addIncludePath(b.path("../drvynvc/include"));
     xclient.addIncludePath(b.path("../cliprdr/include"));
     xclient.addIncludePath(b.path("../rdpsnd/include"));
     xclient.addIncludePath(b.path("../librfxcodec/include/"));
@@ -34,6 +35,7 @@ pub fn build(b: *std.Build) void
     xclient.addObjectFile(b.path("../librlecodec/zig-out/lib/librledecode.a"));
     xclient.addObjectFile(b.path("../rdpc/zig-out/lib/librdpc.a"));
     xclient.addObjectFile(b.path("../svc/zig-out/lib/libsvc.a"));
+    xclient.addObjectFile(b.path("../drvynvc/zig-out/lib/libdrvynvc.a"));
     xclient.addObjectFile(b.path("../cliprdr/zig-out/lib/libcliprdr.a"));
     xclient.addObjectFile(b.path("../rdpsnd/zig-out/lib/librdpsnd.a"));
     xclient.root_module.addImport("hexdump", b.createModule(.{

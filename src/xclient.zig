@@ -35,7 +35,7 @@ fn show_command_line_args1(writer: anytype) !void
     try writer.print("  -c: initial working directory\n", .{});
     try writer.print("  -p: password\n", .{});
     try writer.print("  -n: hostname\n", .{});
-    try writer.print("  -g: set geometry, using format WxH, default is 1024x768\n", .{});
+    try writer.print("  -g: set geometry, workarea, or using format WxH, default is 1024x768\n", .{});
     try writer.print("server:port examples\n", .{});
     try writer.print("  {s} 192.168.1.1\n", .{app_name});
     try writer.print("  {s} 192.168.1.1:3390\n", .{app_name});
@@ -113,6 +113,29 @@ fn process_server_port(rdp_connect: *rdpc_session.rdp_connect_t,
             strings.copyZ(&rdp_connect.server_port, p);
             break;
         }
+    }
+}
+
+//*****************************************************************************
+fn process_args_width_height(slice_arg: []const u8,
+        settings: *c.rdpc_settings_t) !void
+{
+    var seq = std.mem.tokenizeSequence(u8, slice_arg, "x");
+    if (seq.next()) |chunk0|
+    {
+        settings.width = try std.fmt.parseInt(c_int, chunk0, 10);
+        if (seq.next()) |chunk1|
+        {
+            settings.height = try std.fmt.parseInt(c_int, chunk1, 10);
+        }
+        else
+        {
+            return MyError.ShowCommandLine;
+        }
+    }
+    else
+    {
+        return MyError.ShowCommandLine;
     }
 }
 
@@ -224,22 +247,13 @@ fn process_args(settings: *c.rdpc_settings_t,
             }
             index += 1;
             slice_arg = std.mem.sliceTo(std.os.argv[index], 0);
-            var seq = std.mem.tokenizeSequence(u8, slice_arg, "x");
-            if (seq.next()) |chunk0|
+            if (std.mem.eql(u8, slice_arg, "workarea"))
             {
-                settings.width = try std.fmt.parseInt(c_int, chunk0, 10);
-                if (seq.next()) |chunk1|
-                {
-                    settings.height = try std.fmt.parseInt(c_int, chunk1, 10);
-                }
-                else
-                {
-                    return MyError.ShowCommandLine;
-                }
+                settings.workarea = 1;
             }
             else
             {
-                return MyError.ShowCommandLine;
+                try process_args_width_height(slice_arg, settings);
             }
         }
         else if (std.mem.eql(u8, slice_arg, "--rfx"))

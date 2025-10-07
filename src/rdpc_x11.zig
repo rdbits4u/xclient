@@ -63,6 +63,7 @@ pub const rdp_x11_t = struct
     secondary_atom: c.Atom = c.None,
     utf8_atom: c.Atom = c.None,
     incr_atom: c.Atom = c.None,
+    net_workarea: c.Atom = c.None,
     clip_property_atom: c.Atom = c.None,
     get_time_atom: c.Atom = c.None,
     got_xshm: bool = false,
@@ -78,7 +79,7 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     pub fn create(session: *rdpc_session.rdp_session_t,
             allocator: *const std.mem.Allocator,
-            width: u16, height: u16) !*rdp_x11_t
+            width: u16, height: u16, workarea: bool) !*rdp_x11_t
     {
         const self = try allocator.create(rdp_x11_t);
         errdefer allocator.destroy(self);
@@ -115,9 +116,31 @@ pub const rdp_x11_t = struct
         self.secondary_atom = c.XInternAtom(self.display, "SECONDARY", c.False);
         self.utf8_atom = c.XInternAtom(self.display, "UTF8_STRING", c.False);
         self.incr_atom = c.XInternAtom(self.display, "INCR", c.False);
+        self.net_workarea = c.XInternAtom(self.display, "_NET_WORKAREA", c.False);
 
         self.clip_property_atom = c.XInternAtom(self.display, "RDPC_CLIP_PROPERTY_ATOM", c.False);
         self.get_time_atom = c.XInternAtom(self.display, "RDPC_GET_TIME_ATOM", c.False);
+
+        if (workarea)
+        {
+            var long_list = try std.ArrayListUnmanaged(c_long).initCapacity(
+                    self.allocator.*, 32);
+            defer long_list.deinit(self.allocator.*);
+            try rdp_x11_common.get_window_property(c_long, &long_list,
+                    self.root_window, self.net_workarea, c.XA_CARDINAL, 32);
+            if (long_list.items.len > 3)
+            {
+                const lx = long_list.items[0];
+                const ly = long_list.items[1];
+                const lwidth = long_list.items[2];
+                const lheight = long_list.items[3];
+                try self.session.logln(log.LogLevel.debug, @src(),
+                        "workarea x {} y {} width {} height {}",
+                        .{lx, ly, lwidth, lheight});
+                self.width = @intCast(lwidth);
+                self.height = @intCast(lheight);
+            }
+        }
 
         // create window
         try self.create_window();
