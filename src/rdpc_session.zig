@@ -242,6 +242,8 @@ pub const rdp_session_t = struct
         drdynvc.user = self;
         drdynvc.log_msg = rdpc_session_cb.cb_drdynvc_log_msg;
         drdynvc.send_data = rdpc_session_cb.cb_drdynvc_svc_send_data;
+        drdynvc.capabilities_request =
+                rdpc_session_cb.cb_drdynvc_capabilities_request;
         var chan_index = gcc_net.channelCount;
         var chan = &gcc_net.channelDefArray[chan_index];
         std.mem.copyForwards(u8, &chan.name, "DRDYNVC");
@@ -1059,6 +1061,16 @@ pub const rdp_session_t = struct
     pub fn log_msg_slice(self: *rdp_session_t, msg: []const u8) !void
     {
         try self.logln(log.LogLevel.info, @src(), "[{s}]", .{msg});
+    }
+
+    //*************************************************************************
+    pub fn drdynvc_capabilities_request(self: *rdp_session_t, channel_id: u16,
+        version: u16, pc0: u16, pc1: u16, pc2: u16, pc3: u16) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+                "channel_id 0x{X} version {} pc0 0x{X} pc1 0x{X} pc2 0x{X} pc3 0x{X}",
+                .{channel_id, version, pc0, pc1, pc2, pc3});
+        return c.drdynvc_capabilities_response(self.drdynvc, channel_id, version);
     }
 
     //*************************************************************************

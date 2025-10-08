@@ -1,9 +1,12 @@
 
 const std = @import("std");
 const log = @import("log");
+const hexdump = @import("hexdump");
 const rdpc_session = @import("rdpc_session.zig");
 
 const c = rdpc_session.c;
+
+const g_drdynvc_debug: bool = true;
 
 //*****************************************************************************
 // callback
@@ -291,11 +294,46 @@ pub export fn cb_drdynvc_svc_send_data(drdynvc: ?*c.drdynvc_t, channel_id: u16,
         {
             asession.logln(log.LogLevel.info, @src(), "bytes {}", .{bytes})
                     catch return c.LIBDRDYNVC_ERROR_LOG;
+            if (g_drdynvc_debug)
+            {
+                if (data) |adata|
+                {
+                    var slice: []u8 = undefined;
+                    slice.ptr = @ptrCast(adata);
+                    slice.len = bytes;
+                    hexdump.printHexDump(0, slice) catch return c.LIBDRDYNVC_ERROR_LOG;
+                }
+            }
             if (c.svc_send_data(asession.svc, channel_id, data, bytes) ==
                     c.LIBSVC_ERROR_NONE)
             {
                 rv = c.LIBDRDYNVC_ERROR_NONE;
             }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*capabilities_request)(struct drdynvc_t* drdynvc,
+//                             uint16_t channel_id, uint16_t version,
+//                             uint16_t pc0, uint16_t pc1,
+//                             uint16_t pc2, uint16_t pc3);
+pub export fn cb_drdynvc_capabilities_request(drdynvc: ?*c.drdynvc_t,
+        channel_id: u16, version: u16,
+        pc0: u16, pc1: u16, pc2: u16, pc3: u16) c_int
+{
+    var rv = c.LIBDRDYNVC_ERROR_CAPABILITIES_REQUEST;
+    if (drdynvc) |adrdynvc|
+    {
+        const session: ?*rdpc_session.rdp_session_t =
+                @alignCast(@ptrCast(adrdynvc.user));
+        if (session) |asession|
+        {
+            rv = asession.drdynvc_capabilities_request(channel_id, version,
+                    pc0, pc1, pc2, pc3) catch
+                    c.LIBDRDYNVC_ERROR_CAPABILITIES_REQUEST;
         }
     }
     return rv;
