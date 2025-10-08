@@ -22,7 +22,7 @@ pub const c = @cImport(
     @cInclude("pulse/pulseaudio.h");
     @cInclude("librdpc.h");
     @cInclude("libsvc.h");
-    @cInclude("libdrvynvc.h");
+    @cInclude("libdrdynvc.h");
     @cInclude("libcliprdr.h");
     @cInclude("librdpsnd.h");
     @cInclude("rfxcodec_decode.h");
@@ -44,7 +44,8 @@ const SesError = error
     RdpcInit,
     SvcInit,
     SvcCreate,
-    DrvynvcInit,
+    DrdynvcInit,
+    DrdynvcCreate,
     CliprdrInit,
     CliprdrCreate,
     RdpsndInit,
@@ -172,6 +173,7 @@ pub const rdp_session_t = struct
     rdp_connect: *rdp_connect_t,
     rdpc: *c.rdpc_t,
     svc: *c.svc_channels_t,
+    drdynvc: *c.drdynvc_t,
     cliprdr: *c.cliprdr_t,
     rdpsnd: *c.rdpsnd_t,
     formats: rdpsnd_formats_t,
@@ -234,20 +236,35 @@ pub const rdp_session_t = struct
         // setup channels
         const gcc_net = &rdpc.cgcc.net;
 
+        // setup drdynvc
+        var drdynvc = try create_drdynvc();
+        errdefer _ = c.drdynvc_delete(drdynvc);
+        drdynvc.user = self;
+        drdynvc.log_msg = rdpc_session_cb.cb_drdynvc_log_msg;
+        drdynvc.send_data = rdpc_session_cb.cb_drdynvc_svc_send_data;
+        var chan_index = gcc_net.channelCount;
+        var chan = &gcc_net.channelDefArray[chan_index];
+        std.mem.copyForwards(u8, &chan.name, "DRDYNVC");
+        chan.options = 0;
+        svc.channels[chan_index].user = self;
+        svc.channels[chan_index].process_data =
+                rdpc_session_cb.cb_svc_drdynvc_process_data;
+        gcc_net.channelCount += 1;
+
         // setup cliprdr
         var cliprdr = try create_cliprdr();
         errdefer _ = c.cliprdr_delete(cliprdr);
         cliprdr.user = self;
         cliprdr.log_msg = rdpc_session_cb.cb_cliprdr_log_msg;
-        cliprdr.send_data = rdpc_session_cb.cb_cliprdr_send_data;
+        cliprdr.send_data = rdpc_session_cb.cb_cliprdr_svc_send_data;
         cliprdr.ready = rdpc_session_cb.cb_cliprdr_ready;
         cliprdr.format_list = rdpc_session_cb.cb_cliprdr_format_list;
         cliprdr.format_list_response =
                 rdpc_session_cb.cb_cliprdr_format_list_response;
         cliprdr.data_request = rdpc_session_cb.cb_cliprdr_data_request;
         cliprdr.data_response = rdpc_session_cb.cb_cliprdr_data_response;
-        var chan_index = gcc_net.channelCount;
-        var chan = &gcc_net.channelDefArray[chan_index];
+        chan_index = gcc_net.channelCount;
+        chan = &gcc_net.channelDefArray[chan_index];
         std.mem.copyForwards(u8, &chan.name, "CLIPRDR");
         chan.options = 0;
         svc.channels[chan_index].user = self;
@@ -260,7 +277,7 @@ pub const rdp_session_t = struct
         errdefer _ = c.rdpsnd_delete(rdpsnd);
         rdpsnd.user = self;
         rdpsnd.log_msg = rdpc_session_cb.cb_rdpsnd_log_msg;
-        rdpsnd.send_data = rdpc_session_cb.cb_rdpsnd_send_data;
+        rdpsnd.send_data = rdpc_session_cb.cb_rdpsnd_svc_send_data;
         rdpsnd.process_close = rdpc_session_cb.cb_rdpsnd_process_close;
         rdpsnd.process_wave = rdpc_session_cb.cb_rdpsnd_process_wave;
         rdpsnd.process_training = rdpc_session_cb.cb_rdpsnd_process_training;
@@ -277,7 +294,8 @@ pub const rdp_session_t = struct
 
         // init self
         self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
-                .rdpc = rdpc, .svc = svc, .cliprdr = cliprdr, .rdpsnd = rdpsnd,
+                .rdpc = rdpc, .svc = svc, .drdynvc = drdynvc,
+                .cliprdr = cliprdr, .rdpsnd = rdpsnd,
                 .formats = formats};
 
         self.workarea = settings.workarea != 0;
@@ -1327,6 +1345,21 @@ fn create_svc() !*c.svc_channels_t
 }
 
 //*****************************************************************************
+fn create_drdynvc() !*c.drdynvc_t
+{
+    var drdynvc: ?*c.drdynvc_t = null;
+    const rv = c.drdynvc_create(&drdynvc);
+    if (rv == c.LIBDRDYNVC_ERROR_NONE)
+    {
+        if (drdynvc) |adrdynvc|
+        {
+            return adrdynvc;
+        }
+    }
+    return SesError.DrdynvcCreate;
+}
+
+//*****************************************************************************
 fn create_cliprdr() !*c.cliprdr_t
 {
     var cliprdr: ?*c.cliprdr_t = null;
@@ -1361,7 +1394,7 @@ pub fn init() !void
 {
     try err_if(c.rdpc_init() != c.LIBRDPC_ERROR_NONE, SesError.RdpcInit);
     try err_if(c.svc_init() != c.LIBSVC_ERROR_NONE, SesError.SvcInit);
-    try err_if(c.drvynvc_init() != c.LIBSVC_ERROR_NONE, SesError.DrvynvcInit);
+    try err_if(c.drdynvc_init() != c.LIBSVC_ERROR_NONE, SesError.DrdynvcInit);
     try err_if(c.cliprdr_init() != c.LIBCLIPRDR_ERROR_NONE, SesError.CliprdrInit);
     try err_if(c.rdpsnd_init() != c.LIBRDPSND_ERROR_NONE, SesError.RdpsndInit);
 }

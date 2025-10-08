@@ -4,7 +4,7 @@
 #PATH=/opt/zig-x86_64-linux-0.14.1:/usr/local/bin:/usr/bin:/bin
 PATH=/opt/zig-x86_64-linux-0.15.1:/usr/local/bin:/usr/bin:/bin
 
-listOfProjects="librfxcodec librlecodec rdpc svc cliprdr rdpsnd xclient"
+listOfProjects="librfxcodec librlecodec rdpc svc drdynvc cliprdr rdpsnd xclient"
 
 # check that all projects exist
 for proj in $listOfProjects
