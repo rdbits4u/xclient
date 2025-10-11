@@ -341,6 +341,116 @@ pub export fn cb_drdynvc_capabilities_request(drdynvc: ?*c.drdynvc_t,
 
 //*****************************************************************************
 // callback
+// int (*create_request)(struct drdynvc_t* drdynvc, uint16_t channel_id,
+//                       uint32_t drdynvc_channel_id,
+//                       const char* drdynvc_channel_name);
+pub export fn cb_drdynvc_create_request(drdynvc: ?*c.drdynvc_t,
+        channel_id: u16, drdynvc_channel_id: u32,
+        drdynvc_channel_name: ?[*:0]const u8) c_int
+{
+    var rv = c.LIBDRDYNVC_ERROR_CREATE_REQUEST;
+    if (drdynvc) |adrdynvc|
+    {
+        const session: ?*rdpc_session.rdp_session_t =
+                @alignCast(@ptrCast(adrdynvc.user));
+        if (session) |asession|
+        {
+            if (drdynvc_channel_name) |achannel_name|
+            {
+                const slice = std.mem.sliceTo(achannel_name, 0);
+                rv = asession.drdynvc_create_request(channel_id,
+                        drdynvc_channel_id, slice) catch
+                        c.LIBDRDYNVC_ERROR_CREATE_REQUEST;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*data_first)(struct drdynvc_t* drdynvc, uint16_t channel_id,
+//                   uint32_t drdynvc_channel_id, uint32_t total_bytes,
+//                   void* data, uint32_t bytes);
+pub export fn cb_drdynvc_data_first(drdynvc: ?*c.drdynvc_t,
+        channel_id: u16, drdynvc_channel_id: u32, total_bytes: u32,
+        data: ?*anyopaque, bytes: u32) c_int
+{
+    var rv = c.LIBDRDYNVC_ERROR_DATA;
+    if (drdynvc) |adrdynvc|
+    {
+        const session: ?*rdpc_session.rdp_session_t =
+                @alignCast(@ptrCast(adrdynvc.user));
+        if (session) |asession|
+        {
+            if (data) |adata|
+            {
+                var slice: []u8 = undefined;
+                slice.ptr = @ptrCast(adata);
+                slice.len = bytes;
+                rv = asession.drdynvc_data_first_slice(channel_id,
+                        drdynvc_channel_id, total_bytes, slice) catch
+                        c.LIBDRDYNVC_ERROR_DATA;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*data)(struct drdynvc_t* drdynvc, uint16_t channel_id,
+//             uint32_t drdynvc_channel_id,
+//             void* data, uint32_t bytes);
+pub export fn cb_drdynvc_data(drdynvc: ?*c.drdynvc_t,
+        channel_id: u16, drdynvc_channel_id: u32,
+        data: ?*anyopaque, bytes: u32) c_int
+{
+    var rv = c.LIBDRDYNVC_ERROR_DATA;
+    if (drdynvc) |adrdynvc|
+    {
+        const session: ?*rdpc_session.rdp_session_t =
+                @alignCast(@ptrCast(adrdynvc.user));
+        if (session) |asession|
+        {
+            if (data) |adata|
+            {
+                var slice: []u8 = undefined;
+                slice.ptr = @ptrCast(adata);
+                slice.len = bytes;
+                rv = asession.drdynvc_data_slice(channel_id,
+                        drdynvc_channel_id, slice) catch
+                        c.LIBDRDYNVC_ERROR_DATA;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*close)(struct drdynvc_t* drdynvc, uint16_t channel_id,
+//              uint32_t drdynvc_channel_id);
+pub export fn cb_drdynvc_close(drdynvc: ?*c.drdynvc_t,
+        channel_id: u16, drdynvc_channel_id: u32) c_int
+{
+    var rv = c.LIBDRDYNVC_ERROR_CLOSE;
+    if (drdynvc) |adrdynvc|
+    {
+        const session: ?*rdpc_session.rdp_session_t =
+                @alignCast(@ptrCast(adrdynvc.user));
+        if (session) |asession|
+        {
+            rv = asession.drdynvc_close(channel_id,
+                    drdynvc_channel_id) catch
+                    c.LIBDRDYNVC_ERROR_CLOSE;
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
 // int (*process_data)(struct svc_t* svc, uint16_t channel_id,
 //                     void* data, uint32_t bytes);
 pub export fn cb_svc_drdynvc_process_data(svc: ?*c.svc_t, channel_id: u16,
@@ -735,3 +845,57 @@ pub export fn cb_svc_rdpsnd_process_data(svc: ?*c.svc_t, channel_id: u16,
     }
     return rv;
 }
+
+//*****************************************************************************
+// callback
+// int (*log_msg)(struct edisp_t* edisp, const char* msg);
+pub export fn cb_edisp_log_msg(edisp: ?*c.edisp_t,
+        msg: ?[*:0]const u8) c_int
+{
+    var rv = c.LIBEDISP_ERROR_LOG;
+    if (msg) |amsg|
+    {
+        if (edisp) |aedisp|
+        {
+            const session: ?*rdpc_session.rdp_session_t =
+                    @alignCast(@ptrCast(aedisp.user));
+            if (session) |asession|
+            {
+                asession.log_msg_slice(std.mem.sliceTo(amsg, 0)) catch
+                        return c.LIBRDPSND_ERROR_LOG;
+                rv = c.LIBRDPSND_ERROR_NONE;
+            }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// callback
+// int (*send_data)(struct edisp_t* edisp, uint16_t channel_id,
+//                  uint32_t drdynvc_channel_id,
+//                  void* data, uint32_t bytes);
+pub export fn cb_edisp_drdynvc_send_data(edisp: ?*c.edisp_t, channel_id: u16,
+        drdynvc_channel_id: u32, data: ?*anyopaque, bytes: u32) c_int
+{
+    var rv = c.LIBEDISP_ERROR_SEND_DATA;
+    if (edisp) |aedisp|
+    {
+        const session: ?*rdpc_session.rdp_session_t =
+                @alignCast(@ptrCast(aedisp.user));
+        if (session) |asession|
+        {
+            asession.logln_devel(log.LogLevel.info, @src(),
+                    "bytes {}", .{bytes})
+                    catch return c.LIBEDISP_ERROR_LOG;
+            if (c.drdynvc_send_data(asession.drdynvc, channel_id,
+                    drdynvc_channel_id, data, bytes) ==
+                    c.LIBDRDYNVC_ERROR_NONE)
+            {
+                rv = c.LIBEDISP_ERROR_NONE;
+            }
+        }
+    }
+    return rv;
+}
+

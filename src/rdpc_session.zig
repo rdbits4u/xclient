@@ -25,6 +25,7 @@ pub const c = @cImport(
     @cInclude("libdrdynvc.h");
     @cInclude("libcliprdr.h");
     @cInclude("librdpsnd.h");
+    @cInclude("libedisp.h");
     @cInclude("rfxcodec_decode.h");
     @cInclude("rlecodec_decode.h");
     @cInclude("turbojpeg.h");
@@ -50,6 +51,8 @@ const SesError = error
     CliprdrCreate,
     RdpsndInit,
     RdpsndCreate,
+    EdispInit,
+    EdispCreate,
     BitmapUpdate,
     JpgDecode,
 };
@@ -176,6 +179,7 @@ pub const rdp_session_t = struct
     drdynvc: *c.drdynvc_t,
     cliprdr: *c.cliprdr_t,
     rdpsnd: *c.rdpsnd_t,
+    edisp: *c.edisp_t,
     formats: rdpsnd_formats_t,
     connected: bool = false,
     sck: i32 = -1,
@@ -205,6 +209,8 @@ pub const rdp_session_t = struct
     // for bitmap_update
     rle_tdata: []u8 = &.{},
     rle_shm_info: shm_info_t = .{},
+
+    edisp_drdynvc_channel_id: u32 = 0xFFFFFFFF,
 
     //*************************************************************************
     pub fn create(allocator: *const std.mem.Allocator,
@@ -244,6 +250,10 @@ pub const rdp_session_t = struct
         drdynvc.send_data = rdpc_session_cb.cb_drdynvc_svc_send_data;
         drdynvc.capabilities_request =
                 rdpc_session_cb.cb_drdynvc_capabilities_request;
+        drdynvc.create_request = rdpc_session_cb.cb_drdynvc_create_request;
+        drdynvc.data_first = rdpc_session_cb.cb_drdynvc_data_first;
+        drdynvc.data = rdpc_session_cb.cb_drdynvc_data;
+        drdynvc.close = rdpc_session_cb.cb_drdynvc_close;
         var chan_index = gcc_net.channelCount;
         var chan = &gcc_net.channelDefArray[chan_index];
         std.mem.copyForwards(u8, &chan.name, "DRDYNVC");
@@ -292,12 +302,20 @@ pub const rdp_session_t = struct
         svc.channels[chan_index].process_data =
                 rdpc_session_cb.cb_svc_rdpsnd_process_data;
         gcc_net.channelCount += 1;
+
+        // setup edisp
+        var edisp = try create_edisp();
+        errdefer _ = c.edisp_delete(edisp);
+        edisp.user = self;
+        edisp.log_msg = rdpc_session_cb.cb_edisp_log_msg;
+        edisp.send_data = rdpc_session_cb.cb_edisp_drdynvc_send_data;
+
         const formats = try rdpsnd_formats_t.initCapacity(allocator.*, 32);
 
         // init self
         self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
                 .rdpc = rdpc, .svc = svc, .drdynvc = drdynvc,
-                .cliprdr = cliprdr, .rdpsnd = rdpsnd,
+                .cliprdr = cliprdr, .rdpsnd = rdpsnd, .edisp = edisp,
                 .formats = formats};
 
         self.workarea = settings.workarea != 0;
@@ -1065,12 +1083,73 @@ pub const rdp_session_t = struct
 
     //*************************************************************************
     pub fn drdynvc_capabilities_request(self: *rdp_session_t, channel_id: u16,
-        version: u16, pc0: u16, pc1: u16, pc2: u16, pc3: u16) !c_int
+            version: u16, pc0: u16, pc1: u16, pc2: u16, pc3: u16) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
-                "channel_id 0x{X} version {} pc0 0x{X} pc1 0x{X} pc2 0x{X} pc3 0x{X}",
+                "channel_id 0x{X} version {} " ++
+                "pc0 0x{X} pc1 0x{X} pc2 0x{X} pc3 0x{X}",
                 .{channel_id, version, pc0, pc1, pc2, pc3});
-        return c.drdynvc_capabilities_response(self.drdynvc, channel_id, version);
+        return c.drdynvc_send_capabilities_response(self.drdynvc,
+                channel_id, version);
+    }
+
+    //*************************************************************************
+    pub fn drdynvc_create_request(self: *rdp_session_t, channel_id: u16,
+            drdynvc_channel_id: u32, drdynvc_channel_name: []const u8) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+                "channel_id 0x{X} drdynvc_channel_id 0x{X} " ++
+                "drdynvc_channel_name {s}",
+                .{channel_id, drdynvc_channel_id, drdynvc_channel_name});
+        if (std.mem.eql(u8, drdynvc_channel_name,
+                "Microsoft::Windows::RDS::DisplayControl"))
+        {
+            self.edisp_drdynvc_channel_id = drdynvc_channel_id;
+            return c.drdynvc_send_create_response(self.drdynvc, channel_id,
+                    drdynvc_channel_id, 0);
+        }
+        return c.LIBDRDYNVC_ERROR_NONE;
+    }
+
+    //*************************************************************************
+    pub fn drdynvc_data_first_slice(self: *rdp_session_t, channel_id: u16,
+            drdynvc_channel_id: u32, total_bytes: u32, slice: []u8) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+                "channel_id 0x{X} drdynvc_channel_id 0x{X} " ++
+                "total_bytes {} slice.len {}",
+                .{channel_id, drdynvc_channel_id, total_bytes, slice.len});
+        return c.LIBDRDYNVC_ERROR_NONE;
+    }
+
+    //*************************************************************************
+    pub fn drdynvc_data_slice(self: *rdp_session_t, channel_id: u16,
+            drdynvc_channel_id: u32, slice: []u8) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+                "channel_id 0x{X} drdynvc_channel_id 0x{X} " ++
+                "slice.len {}",
+                .{channel_id, drdynvc_channel_id, slice.len});
+        if (drdynvc_channel_id == self.edisp_drdynvc_channel_id)
+        {
+            if (c.edisp_process_data(self.edisp, channel_id,
+                    drdynvc_channel_id, slice.ptr,
+                    @truncate(slice.len)) != c.LIBEDISP_ERROR_NONE)
+            {
+                return c.LIBDRDYNVC_ERROR_DATA;
+            }
+        }
+        return c.LIBDRDYNVC_ERROR_NONE;
+    }
+
+    //*************************************************************************
+    pub fn drdynvc_close(self: *rdp_session_t, channel_id: u16,
+            drdynvc_channel_id: u32) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+                "channel_id 0x{X} drdynvc_channel_id 0x{X}",
+                .{channel_id, drdynvc_channel_id});
+        return c.LIBDRDYNVC_ERROR_NONE;
     }
 
     //*************************************************************************
@@ -1402,6 +1481,21 @@ fn create_rdpsnd() !*c.rdpsnd_t
 }
 
 //*****************************************************************************
+fn create_edisp() !*c.edisp_t
+{
+    var edisp: ?*c.edisp_t = null;
+    const rv = c.edisp_create(&edisp);
+    if (rv == c.LIBEDISP_ERROR_NONE)
+    {
+        if (edisp) |aedisp|
+        {
+            return aedisp;
+        }
+    }
+    return SesError.EdispCreate;
+}
+
+//*****************************************************************************
 pub fn init() !void
 {
     try err_if(c.rdpc_init() != c.LIBRDPC_ERROR_NONE, SesError.RdpcInit);
@@ -1409,6 +1503,7 @@ pub fn init() !void
     try err_if(c.drdynvc_init() != c.LIBSVC_ERROR_NONE, SesError.DrdynvcInit);
     try err_if(c.cliprdr_init() != c.LIBCLIPRDR_ERROR_NONE, SesError.CliprdrInit);
     try err_if(c.rdpsnd_init() != c.LIBRDPSND_ERROR_NONE, SesError.RdpsndInit);
+    try err_if(c.edisp_init() != c.LIBEDISP_ERROR_NONE, SesError.EdispInit);
 }
 
 //*****************************************************************************
