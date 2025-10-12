@@ -320,20 +320,20 @@ pub export fn cb_drdynvc_svc_send_data(drdynvc: ?*c.drdynvc_t, channel_id: u16,
 //                             uint16_t channel_id, uint16_t version,
 //                             uint16_t pc0, uint16_t pc1,
 //                             uint16_t pc2, uint16_t pc3);
-pub export fn cb_drdynvc_capabilities_request(drdynvc: ?*c.drdynvc_t,
+pub export fn cb_drdynvc_process_cap_request(drdynvc: ?*c.drdynvc_t,
         channel_id: u16, version: u16,
         pc0: u16, pc1: u16, pc2: u16, pc3: u16) c_int
 {
-    var rv = c.LIBDRDYNVC_ERROR_CAPABILITIES_REQUEST;
+    var rv = c.LIBDRDYNVC_ERROR_CAP_REQUEST;
     if (drdynvc) |adrdynvc|
     {
         const session: ?*rdpc_session.rdp_session_t =
                 @alignCast(@ptrCast(adrdynvc.user));
         if (session) |asession|
         {
-            rv = asession.drdynvc_capabilities_request(channel_id, version,
-                    pc0, pc1, pc2, pc3) catch
-                    c.LIBDRDYNVC_ERROR_CAPABILITIES_REQUEST;
+            rv = asession.drdynvc_process_cap_request(channel_id,
+                    version, pc0, pc1, pc2, pc3) catch
+                    c.LIBDRDYNVC_ERROR_CAP_REQUEST;
         }
     }
     return rv;
@@ -341,10 +341,11 @@ pub export fn cb_drdynvc_capabilities_request(drdynvc: ?*c.drdynvc_t,
 
 //*****************************************************************************
 // callback
-// int (*create_request)(struct drdynvc_t* drdynvc, uint16_t channel_id,
+// int (*process_create_request)(struct drdynvc_t* drdynvc,
+//                       uint16_t channel_id,
 //                       uint32_t drdynvc_channel_id,
 //                       const char* drdynvc_channel_name);
-pub export fn cb_drdynvc_create_request(drdynvc: ?*c.drdynvc_t,
+pub export fn cb_drdynvc_process_create_request(drdynvc: ?*c.drdynvc_t,
         channel_id: u16, drdynvc_channel_id: u32,
         drdynvc_channel_name: ?[*:0]const u8) c_int
 {
@@ -358,7 +359,7 @@ pub export fn cb_drdynvc_create_request(drdynvc: ?*c.drdynvc_t,
             if (drdynvc_channel_name) |achannel_name|
             {
                 const slice = std.mem.sliceTo(achannel_name, 0);
-                rv = asession.drdynvc_create_request(channel_id,
+                rv = asession.drdynvc_process_create_request(channel_id,
                         drdynvc_channel_id, slice) catch
                         c.LIBDRDYNVC_ERROR_CREATE_REQUEST;
             }
@@ -369,10 +370,12 @@ pub export fn cb_drdynvc_create_request(drdynvc: ?*c.drdynvc_t,
 
 //*****************************************************************************
 // callback
-// int (*data_first)(struct drdynvc_t* drdynvc, uint16_t channel_id,
-//                   uint32_t drdynvc_channel_id, uint32_t total_bytes,
-//                   void* data, uint32_t bytes);
-pub export fn cb_drdynvc_data_first(drdynvc: ?*c.drdynvc_t,
+// int (*process_data_first)(struct drdynvc_t* drdynvc,
+//                           uint16_t channel_id,
+//                           uint32_t drdynvc_channel_id,
+//                           uint32_t total_bytes,
+//                           void* data, uint32_t bytes);
+pub export fn cb_drdynvc_process_data_first(drdynvc: ?*c.drdynvc_t,
         channel_id: u16, drdynvc_channel_id: u32, total_bytes: u32,
         data: ?*anyopaque, bytes: u32) c_int
 {
@@ -388,7 +391,7 @@ pub export fn cb_drdynvc_data_first(drdynvc: ?*c.drdynvc_t,
                 var slice: []u8 = undefined;
                 slice.ptr = @ptrCast(adata);
                 slice.len = bytes;
-                rv = asession.drdynvc_data_first_slice(channel_id,
+                rv = asession.drdynvc_process_slice_data_first(channel_id,
                         drdynvc_channel_id, total_bytes, slice) catch
                         c.LIBDRDYNVC_ERROR_DATA;
             }
@@ -399,10 +402,10 @@ pub export fn cb_drdynvc_data_first(drdynvc: ?*c.drdynvc_t,
 
 //*****************************************************************************
 // callback
-// int (*data)(struct drdynvc_t* drdynvc, uint16_t channel_id,
-//             uint32_t drdynvc_channel_id,
-//             void* data, uint32_t bytes);
-pub export fn cb_drdynvc_data(drdynvc: ?*c.drdynvc_t,
+// int (*process_data)(struct drdynvc_t* drdynvc, uint16_t channel_id,
+//                     uint32_t drdynvc_channel_id,
+//                     void* data, uint32_t bytes);
+pub export fn cb_drdynvc_process_data(drdynvc: ?*c.drdynvc_t,
         channel_id: u16, drdynvc_channel_id: u32,
         data: ?*anyopaque, bytes: u32) c_int
 {
@@ -418,7 +421,7 @@ pub export fn cb_drdynvc_data(drdynvc: ?*c.drdynvc_t,
                 var slice: []u8 = undefined;
                 slice.ptr = @ptrCast(adata);
                 slice.len = bytes;
-                rv = asession.drdynvc_data_slice(channel_id,
+                rv = asession.drdynvc_process_slice_data(channel_id,
                         drdynvc_channel_id, slice) catch
                         c.LIBDRDYNVC_ERROR_DATA;
             }
@@ -429,9 +432,9 @@ pub export fn cb_drdynvc_data(drdynvc: ?*c.drdynvc_t,
 
 //*****************************************************************************
 // callback
-// int (*close)(struct drdynvc_t* drdynvc, uint16_t channel_id,
-//              uint32_t drdynvc_channel_id);
-pub export fn cb_drdynvc_close(drdynvc: ?*c.drdynvc_t,
+// int (*process_close)(struct drdynvc_t* drdynvc, uint16_t channel_id,
+//                      uint32_t drdynvc_channel_id);
+pub export fn cb_drdynvc_process_close(drdynvc: ?*c.drdynvc_t,
         channel_id: u16, drdynvc_channel_id: u32) c_int
 {
     var rv = c.LIBDRDYNVC_ERROR_CLOSE;
@@ -441,7 +444,7 @@ pub export fn cb_drdynvc_close(drdynvc: ?*c.drdynvc_t,
                 @alignCast(@ptrCast(adrdynvc.user));
         if (session) |asession|
         {
-            rv = asession.drdynvc_close(channel_id,
+            rv = asession.drdynvc_process_close(channel_id,
                     drdynvc_channel_id) catch
                     c.LIBDRDYNVC_ERROR_CLOSE;
         }
@@ -862,9 +865,36 @@ pub export fn cb_edisp_log_msg(edisp: ?*c.edisp_t,
             if (session) |asession|
             {
                 asession.log_msg_slice(std.mem.sliceTo(amsg, 0)) catch
-                        return c.LIBRDPSND_ERROR_LOG;
-                rv = c.LIBRDPSND_ERROR_NONE;
+                        return c.LIBEDISP_ERROR_LOG;
+                rv = c.LIBEDISP_ERROR_NONE;
             }
+        }
+    }
+    return rv;
+}
+
+//*****************************************************************************
+// int (*caps)(struct edisp_t* edisp, uint16_t channel_id,
+//             uint32_t drdynvc_channel_id, uint32_t max_num_monitor,
+//             uint32_t max_monitor_area_factor_a,
+//             uint32_t max_monitor_area_factor_b);
+pub export fn cb_edisp_process_caps(edisp: ?*c.edisp_t, channel_id: u16,
+        drdynvc_channel_id: u32, max_num_monitor: u32,
+        max_monitor_area_factor_a: u32, max_monitor_area_factor_b: u32) c_int
+{
+    var rv = c.LIBEDISP_ERROR_CAPS;
+    if (edisp) |aedisp|
+    {
+        const session: ?*rdpc_session.rdp_session_t =
+                @alignCast(@ptrCast(aedisp.user));
+        if (session) |asession|
+        {
+            rv = asession.edisp_process_caps(channel_id,
+                    drdynvc_channel_id,
+                    max_num_monitor,
+                    max_monitor_area_factor_a,
+                    max_monitor_area_factor_b) catch
+                    return c.LIBEDISP_ERROR_CAPS;
         }
     }
     return rv;

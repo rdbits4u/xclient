@@ -211,6 +211,7 @@ pub const rdp_session_t = struct
     rle_shm_info: shm_info_t = .{},
 
     edisp_drdynvc_channel_id: u32 = 0xFFFFFFFF,
+    egfx_drdynvc_channel_id: u32 = 0xFFFFFFFF,
 
     //*************************************************************************
     pub fn create(allocator: *const std.mem.Allocator,
@@ -248,12 +249,11 @@ pub const rdp_session_t = struct
         drdynvc.user = self;
         drdynvc.log_msg = rdpc_session_cb.cb_drdynvc_log_msg;
         drdynvc.send_data = rdpc_session_cb.cb_drdynvc_svc_send_data;
-        drdynvc.capabilities_request =
-                rdpc_session_cb.cb_drdynvc_capabilities_request;
-        drdynvc.create_request = rdpc_session_cb.cb_drdynvc_create_request;
-        drdynvc.data_first = rdpc_session_cb.cb_drdynvc_data_first;
-        drdynvc.data = rdpc_session_cb.cb_drdynvc_data;
-        drdynvc.close = rdpc_session_cb.cb_drdynvc_close;
+        drdynvc.process_cap_request = rdpc_session_cb.cb_drdynvc_process_cap_request;
+        drdynvc.process_create_request = rdpc_session_cb.cb_drdynvc_process_create_request;
+        drdynvc.process_data_first = rdpc_session_cb.cb_drdynvc_process_data_first;
+        drdynvc.process_data = rdpc_session_cb.cb_drdynvc_process_data;
+        drdynvc.process_close = rdpc_session_cb.cb_drdynvc_process_close;
         var chan_index = gcc_net.channelCount;
         var chan = &gcc_net.channelDefArray[chan_index];
         std.mem.copyForwards(u8, &chan.name, "DRDYNVC");
@@ -309,6 +309,7 @@ pub const rdp_session_t = struct
         edisp.user = self;
         edisp.log_msg = rdpc_session_cb.cb_edisp_log_msg;
         edisp.send_data = rdpc_session_cb.cb_edisp_drdynvc_send_data;
+        edisp.process_caps = rdpc_session_cb.cb_edisp_process_caps;
 
         const formats = try rdpsnd_formats_t.initCapacity(allocator.*, 32);
 
@@ -1082,20 +1083,21 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    pub fn drdynvc_capabilities_request(self: *rdp_session_t, channel_id: u16,
+    pub fn drdynvc_process_cap_request(self: *rdp_session_t, channel_id: u16,
             version: u16, pc0: u16, pc1: u16, pc2: u16, pc3: u16) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
                 "channel_id 0x{X} version {} " ++
                 "pc0 0x{X} pc1 0x{X} pc2 0x{X} pc3 0x{X}",
                 .{channel_id, version, pc0, pc1, pc2, pc3});
-        return c.drdynvc_send_capabilities_response(self.drdynvc,
+        return c.drdynvc_send_cap_response(self.drdynvc,
                 channel_id, version);
     }
 
     //*************************************************************************
-    pub fn drdynvc_create_request(self: *rdp_session_t, channel_id: u16,
-            drdynvc_channel_id: u32, drdynvc_channel_name: []const u8) !c_int
+    pub fn drdynvc_process_create_request(self: *rdp_session_t,
+            channel_id: u16, drdynvc_channel_id: u32,
+            drdynvc_channel_name: []const u8) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
                 "channel_id 0x{X} drdynvc_channel_id 0x{X} " ++
@@ -1108,12 +1110,25 @@ pub const rdp_session_t = struct
             return c.drdynvc_send_create_response(self.drdynvc, channel_id,
                     drdynvc_channel_id, 0);
         }
+        else if (std.mem.eql(u8, drdynvc_channel_name,
+                "Microsoft::Windows::RDS::Graphics"))
+        {
+            self.egfx_drdynvc_channel_id = drdynvc_channel_id;
+            return c.drdynvc_send_create_response(self.drdynvc, channel_id,
+                    drdynvc_channel_id, 0);
+        }
+        else
+        {
+            return c.drdynvc_send_create_response(self.drdynvc, channel_id,
+                    drdynvc_channel_id, 1);
+        }
         return c.LIBDRDYNVC_ERROR_NONE;
     }
 
     //*************************************************************************
-    pub fn drdynvc_data_first_slice(self: *rdp_session_t, channel_id: u16,
-            drdynvc_channel_id: u32, total_bytes: u32, slice: []u8) !c_int
+    pub fn drdynvc_process_slice_data_first(self: *rdp_session_t,
+            channel_id: u16, drdynvc_channel_id: u32,
+            total_bytes: u32, slice: []u8) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
                 "channel_id 0x{X} drdynvc_channel_id 0x{X} " ++
@@ -1123,7 +1138,7 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    pub fn drdynvc_data_slice(self: *rdp_session_t, channel_id: u16,
+    pub fn drdynvc_process_slice_data(self: *rdp_session_t, channel_id: u16,
             drdynvc_channel_id: u32, slice: []u8) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
@@ -1143,7 +1158,7 @@ pub const rdp_session_t = struct
     }
 
     //*************************************************************************
-    pub fn drdynvc_close(self: *rdp_session_t, channel_id: u16,
+    pub fn drdynvc_process_close(self: *rdp_session_t, channel_id: u16,
             drdynvc_channel_id: u32) !c_int
     {
         try self.logln(log.LogLevel.info, @src(),
@@ -1401,6 +1416,20 @@ pub const rdp_session_t = struct
         return c.rdpsnd_send_formats(self.rdpsnd, channel_id, flags,
                 volume, pitch, dgram_port, version, block_no,
                 @truncate(sformats.items.len), sformats.items.ptr);
+    }
+
+    //*****************************************************************************
+    pub fn edisp_process_caps(self: *rdp_session_t, channel_id: u16,
+            drdynvc_channel_id: u32, max_num_monitor: u32,
+            max_monitor_area_factor_a: u32,
+            max_monitor_area_factor_b: u32) !c_int
+    {
+        try self.logln(log.LogLevel.info, @src(),
+            "channel_id 0x{X} drdynvc_channel_id 0x{X} max_num_monitor {} " ++
+            "max_monitor_area_factor_a {} max_monitor_area_factor_b {}",
+            .{channel_id, drdynvc_channel_id, max_num_monitor,
+            max_monitor_area_factor_a, max_monitor_area_factor_b});
+        return 0;
     }
 
 };
