@@ -75,6 +75,7 @@ pub const rdp_x11_t = struct
     xfixes_error_base: i32 = 0,
     max_request_size: c_long = 0,
     ex_max_request_size: c_long = 0,
+    resize_timer: ?*anyopaque = null,
 
     //*************************************************************************
     pub fn create(session: *rdpc_session.rdp_session_t,
@@ -305,6 +306,7 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     pub fn delete(self: *rdp_x11_t) void
     {
+        self.session.timer_free(self.resize_timer);
         self.rdp_x11_clip.delete();
         for (self.pointer_cache) |cur|
         {
@@ -482,7 +484,7 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     fn handle_focus_in(self: *rdp_x11_t, event: *c.XFocusChangeEvent) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(),
+        try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "", .{});
         _ = event;
         // look for any down keys
@@ -510,7 +512,7 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     fn handle_focus_out(self: *rdp_x11_t, event: *c.XFocusChangeEvent) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(),
+        try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "", .{});
         _ = event;
     }
@@ -535,7 +537,7 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     fn handle_visibility(self: *rdp_x11_t, event: *c.XVisibilityEvent) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
+        try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
         _ = event;
     }
 
@@ -569,12 +571,15 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     fn handle_configure(self: *rdp_x11_t, event: *c.XConfigureEvent) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
+        try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
         const width: c_uint = @bitCast(event.width);
         const height: c_uint = @bitCast(event.height);
         if ((self.window == event.window) and (event.event == event.window))
         {
             try self.check_pixmap(width, height);
+            self.resize_timer = try self.session.timer_set(
+                    self.resize_timer, 1000, resize_timer_fn, self);
+
         }
     }
 
@@ -696,7 +701,7 @@ pub const rdp_x11_t = struct
     // check that pixmap is created and the right size
     fn check_pixmap(self: *rdp_x11_t, width: c_uint, height: c_uint) !void
     {
-        try self.session.logln(log.LogLevel.debug, @src(), "", .{});
+        try self.session.logln_devel(log.LogLevel.debug, @src(), "", .{});
         if ((self.pixmap == c.None) or
                 (self.width != width) or (self.height != height))
         {
@@ -1077,4 +1082,15 @@ fn u16_from_c_int(in: c_int) u16
     const max = std.math.maxInt(u16);
     const val = if (in < 0) 0 else if (in > max) max else in;
     return @intCast(val);
+}
+
+//*****************************************************************************
+fn resize_timer_fn(user: ?*anyopaque) !void
+{
+    const self: *rdp_x11_t = @alignCast(@ptrCast(user));
+    try self.session.logln(log.LogLevel.debug, @src(), "width {} height {}",
+            .{self.width, self.height});
+    //const width = self.width ;
+    //const height = self.height;
+    //try self.session.resize_desktop(width, height);
 }
