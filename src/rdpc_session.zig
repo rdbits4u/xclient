@@ -170,6 +170,17 @@ pub const rdpsnd_format_t = struct
 
 const rdpsnd_formats_t = std.ArrayListUnmanaged(*rdpsnd_format_t);
 
+const timer_fn_t = ?*const fn (user: ?*anyopaque) anyerror!void;
+
+const timer_t = struct
+{
+    trigger_mstime: i64 = 0,
+    user: ?*anyopaque = null,
+    timer_fn: timer_fn_t = null,
+};
+
+const timer_list_t = std.ArrayListUnmanaged(*timer_t);
+
 pub const rdp_session_t = struct
 {
     allocator: *const std.mem.Allocator,
@@ -191,7 +202,7 @@ pub const rdp_session_t = struct
     audio_tail: ?*audio_t = null,
     rdp_x11: ?*rdpc_x11.rdp_x11_t = null,
     pulse: ?*rdpc_pulse.rdp_pulse_t = null,
-
+    timer_list: timer_list_t = .{},
     width: u16 = 0,
     height: u16 = 0,
     workarea: bool = false,
@@ -210,6 +221,7 @@ pub const rdp_session_t = struct
     rle_tdata: []u8 = &.{},
     rle_shm_info: shm_info_t = .{},
 
+    drdynvc_svc_channel_id: u16 = 0,
     edisp_drdynvc_channel_id: u32 = 0xFFFFFFFF,
     egfx_drdynvc_channel_id: u32 = 0xFFFFFFFF,
 
@@ -350,11 +362,19 @@ pub const rdp_session_t = struct
         {
             apulse.delete();
         }
+        // cleanup timer_list
+        for (self.timer_list.items) |*atimer|
+        {
+            self.allocator.destroy(atimer);
+        }
+        self.timer_list.deinit(self.allocator.*);
+        // cleanup formats
         for (self.formats.items) |ardpsnd_format|
         {
             ardpsnd_format.delete();
         }
         self.formats.deinit(self.allocator.*);
+        // cleanup self
         self.allocator.destroy(self);
     }
 
@@ -981,7 +1001,25 @@ pub const rdp_session_t = struct
         while (true)
         {
             try self.logln_devel(log.LogLevel.debug, @src(), "loop", .{});
+
             timeout = -1;
+            if (self.timer_list.items.len > 0)
+            {
+                timeout = std.math.maxInt(i32);
+                const now = std.time.milliTimestamp();
+                var index = self.timer_list.items.len;
+                while (index > 0)
+                {
+                    index -= 1;
+                    const timer = self.timer_list.items.ptr[index];
+                    const trigger_mstime = timer.trigger_mstime;
+                    const diff: i32 = @truncate(trigger_mstime - now);
+                    timeout = @intCast(@min(@max(diff, 0), timeout));
+                }
+            }
+            try self.logln_devel(log.LogLevel.debug, @src(),
+                    "loop: timeout {}", .{timeout});
+
             poll_count = 0;
             // setup terminate fd
             polls[poll_count].fd = g_term[0];
@@ -1057,10 +1095,6 @@ pub const rdp_session_t = struct
                 {
                     try self.process_write_server_data();
                 }
-                if (self.rdp_x11) |ardp_x11|
-                {
-                    try ardp_x11.check_fds();
-                }
                 if (pulse_index) |apulse_index|
                 {
                     if ((active_polls[apulse_index].revents & posix.POLL.IN) != 0)
@@ -1069,10 +1103,32 @@ pub const rdp_session_t = struct
                     }
                 }
             }
-            else
+            if (self.rdp_x11) |ardp_x11|
             {
-                return SesError.Connect;
+                try ardp_x11.check_fds();
             }
+
+            if (self.timer_list.items.len > 0)
+            {
+                const now = std.time.milliTimestamp();
+                var index = self.timer_list.items.len;
+                while (index > 0)
+                {
+                    index -= 1;
+                    const timer = self.timer_list.items.ptr[index];
+                    const trigger_mstime = timer.trigger_mstime;
+                    if (trigger_mstime <= now)
+                    {
+                        // do callback
+                        if (timer.timer_fn) |atimer_fn|
+                        {
+                            try atimer_fn(timer.user);
+                        }
+                        _ = self.timer_list.swapRemove(index);
+                    }
+                }
+            }
+
         }
     }
 
@@ -1106,6 +1162,7 @@ pub const rdp_session_t = struct
         if (std.mem.eql(u8, drdynvc_channel_name,
                 "Microsoft::Windows::RDS::DisplayControl"))
         {
+            self.drdynvc_svc_channel_id = channel_id;
             self.edisp_drdynvc_channel_id = drdynvc_channel_id;
             return c.drdynvc_send_create_response(self.drdynvc, channel_id,
                     drdynvc_channel_id, 0);
@@ -1113,6 +1170,7 @@ pub const rdp_session_t = struct
         else if (std.mem.eql(u8, drdynvc_channel_name,
                 "Microsoft::Windows::RDS::Graphics"))
         {
+            self.drdynvc_svc_channel_id = channel_id;
             self.egfx_drdynvc_channel_id = drdynvc_channel_id;
             return c.drdynvc_send_create_response(self.drdynvc, channel_id,
                     drdynvc_channel_id, 0);
@@ -1430,6 +1488,82 @@ pub const rdp_session_t = struct
             .{channel_id, drdynvc_channel_id, max_num_monitor,
             max_monitor_area_factor_a, max_monitor_area_factor_b});
         return 0;
+    }
+
+    //*****************************************************************************
+    pub fn resize_desktop(self: *rdp_session_t, width: u32, height: u32) !void
+    {
+        var monitors: [1] c.monitor_layout_t = undefined;
+        monitors[0] = .{};
+        try self.logln(log.LogLevel.info, @src(),
+                "width {} height {}", .{width, height});
+        monitors[0].Flags = 1;
+        monitors[0].Width = width;
+        monitors[0].Height = height;
+        _ = c.edisp_send_monitor_layout(self.edisp,
+                self.drdynvc_svc_channel_id,
+                self.edisp_drdynvc_channel_id,
+                1, &monitors);
+    }
+
+    //*****************************************************************************
+    pub fn timer_set(self: *rdp_session_t, timer: ?*anyopaque, mstime: i32,
+            timer_fn: timer_fn_t, user: ?*anyopaque) !*anyopaque
+    {
+        var ltimer: *timer_t = undefined;
+        if (timer) |atimer|
+        {
+            const aatimer: *timer_t = @alignCast(@ptrCast(atimer));
+            for (self.timer_list.items) |item|
+            {
+                if (item == aatimer)
+                {
+                    item.trigger_mstime = std.time.milliTimestamp() + mstime;
+                    item.user = user;
+                    item.timer_fn = timer_fn;
+                    return atimer;
+                }
+            }
+            ltimer = aatimer;
+        }
+        else
+        {
+            ltimer = try self.allocator.create(timer_t);
+            ltimer.* = .{};
+        }
+        ltimer.trigger_mstime = std.time.milliTimestamp() + mstime;
+        ltimer.user = user;
+        ltimer.timer_fn = timer_fn;
+        try self.timer_list.append(self.allocator.*, ltimer);
+        return ltimer;
+    }
+
+    //*****************************************************************************
+    pub fn timer_cancel(self: *rdp_session_t, timer: ?*anyopaque) void
+    {
+        if (timer) |atimer|
+        {
+            const aatimer: *timer_t = @alignCast(@ptrCast(atimer));
+            for (self.timer_list.items, 0..) |item, index|
+            {
+                if (item == aatimer)
+                {
+                    _ = self.timer_list.swapRemove(index);
+                    return;
+                }
+            }
+        }
+    }
+
+    //*****************************************************************************
+    pub fn timer_free(self: *rdp_session_t, timer: ?*anyopaque) void
+    {
+        self.timer_cancel(timer);
+        if (timer) |atimer|
+        {
+            const aatimer: *timer_t = @alignCast(@ptrCast(atimer));
+            self.allocator.destroy(aatimer);
+        }
     }
 
 };
