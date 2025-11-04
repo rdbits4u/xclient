@@ -285,7 +285,11 @@ pub const rdp_pulse_t = struct
         var neg: c_int = undefined;
         const rv = c.pa_stream_get_latency(self.pa_stream, &usec, &neg);
         const usec1 = c.pa_bytes_to_usec(bytes, &self.sample_spec);
-        return if ((rv == 0) and (neg == 0)) (usec + usec1) / 1000 else 0;
+        if ((rv == 0) and (neg == 0))
+        {
+            return @truncate((usec + usec1) / 1000);
+        }
+        return 0;
     }
 
     //*************************************************************************

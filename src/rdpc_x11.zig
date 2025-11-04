@@ -737,13 +737,12 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
-    fn init_box(box: *c.XSegment, x: isize, y: isize,
-            width: isize, height: isize) void
+    fn init_box(box: *c.XSegment, x: i64, y: i64, width: i64, height: i64) void
     {
         box.x1 = @intCast(x);
         box.y1 = @intCast(y);
-        box.x2 = @intCast(x + @as(isize, @intCast(width)));
-        box.y2 = @intCast(y + @as(isize, @intCast(height)));
+        box.x2 = @intCast(x + width);
+        box.y2 = @intCast(y + height);
     }
 
     //*************************************************************************
