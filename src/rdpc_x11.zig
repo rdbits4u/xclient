@@ -737,15 +737,6 @@ pub const rdp_x11_t = struct
     }
 
     //*************************************************************************
-    fn init_box(box: *c.XSegment, x: i64, y: i64, width: i64, height: i64) void
-    {
-        box.x1 = @intCast(x);
-        box.y1 = @intCast(y);
-        box.x2 = @intCast(x + width);
-        box.y2 = @intCast(y + height);
-    }
-
-    //*************************************************************************
     // draw without shm, try to draw with minimum XPutImage pixels
     // interect each clip with dst and draw the non nil rects
     fn draw_image_by_clip(self: *rdp_x11_t,
@@ -755,10 +746,15 @@ pub const rdp_x11_t = struct
             data: []u8, clips: [*]c.rfx_rect, num_clips: u32,
             stride_bytes: c_int) !void
     {
-        var dest_rect: c.XSegment = undefined;
-        init_box(&dest_rect, dst_left, dst_top,
-                @min(src_width, dst_width),
-                @min(src_height, dst_height));
+        var x2 = dst_left;
+        x2 += @intCast(@min(src_width, dst_width));
+        var y2 = dst_top;
+        y2 += @intCast(@min(src_height, dst_height));
+        const dest_rect: c.XSegment = .{
+                .x1 = @intCast(dst_left),
+                .y1 = @intCast(dst_top),
+                .x2 = @intCast(x2),
+                .y2 = @intCast(y2)};
         var jndex: u32 = 0;
         while (jndex < num_clips) : (jndex += 1)
         {
@@ -766,8 +762,11 @@ pub const rdp_x11_t = struct
             try self.session.logln_devel(log.LogLevel.debug, @src(),
                     "x {} y {} width {} height {}",
                     .{clip.x, clip.y, clip.cx, clip.cy});
-            var clip_rect: c.XSegment = undefined;
-            init_box(&clip_rect, clip.x, clip.y, clip.cx, clip.cy);
+            const clip_rect: c.XSegment = .{
+                    .x1 = @intCast(clip.x),
+                    .y1 = @intCast(clip.y),
+                    .x2 = @intCast(clip.x + clip.cx),
+                    .y2 = @intCast(clip.y + clip.cy)};
             var draw_rect: c.XSegment = undefined;
             // intersect dest_rect and clip_rect
             draw_rect.x1 = @max(dest_rect.x1, clip_rect.x1);
