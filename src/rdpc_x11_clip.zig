@@ -100,7 +100,7 @@ pub const rdp_x11_clip_t = struct
             rdp_x11: *rdpc_x11.rdp_x11_t) !*rdp_x11_clip_t
     {
         const self = try allocator.create(rdp_x11_clip_t);
-        const formats = try cliprdr_formats_t.initCapacity(allocator.*, 32);
+        const formats: cliprdr_formats_t = .{};
         self.* = .{.allocator = allocator, .session = session,
                 .rdp_x11 = rdp_x11, .formats = formats};
         return self;
@@ -222,8 +222,7 @@ pub const rdp_x11_clip_t = struct
                 var utf16_as_u8: []u8 = undefined;
                 utf16_as_u8.ptr = @ptrCast(requested_format_data);
                 utf16_as_u8.len = requested_format_data_bytes;
-                var al = try std.ArrayListUnmanaged(u32).initCapacity(
-                        self.allocator.*, 32);
+                var al: std.ArrayListUnmanaged(u32) = .{};
                 defer al.deinit(self.allocator.*);
                 try strings.utf16_as_u8_to_u32_array(self.allocator,
                         utf16_as_u8, &al);
@@ -395,8 +394,7 @@ pub const rdp_x11_clip_t = struct
     {
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
         const x11 = self.rdp_x11;
-        var al = try std.ArrayListUnmanaged(c.cliprdr_format_t).initCapacity(
-                self.allocator.*, 32);
+        var al: std.ArrayListUnmanaged(c.cliprdr_format_t) = .{};
         defer al.deinit(self.allocator.*);
         for (targets) |atom|
         {
@@ -426,8 +424,7 @@ pub const rdp_x11_clip_t = struct
     fn process_target_utf8(self: *rdp_x11_clip_t, utf8: []u8) !void
     {
         try self.session.logln(log.LogLevel.debug, @src(), "", .{});
-        var al = try std.ArrayListUnmanaged(u32).initCapacity(
-                self.allocator.*, 32);
+        var al: std.ArrayListUnmanaged(u32) = .{};
         defer al.deinit(self.allocator.*);
         try strings.utf8_to_u32_array(self.allocator, utf8, &al);
         const utf16_as_u8 = try self.allocator.alloc(u8,
@@ -482,8 +479,7 @@ pub const rdp_x11_clip_t = struct
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is targets_atom", .{});
-            var atom_list = try std.ArrayListUnmanaged(c.Atom).initCapacity(
-                    self.allocator.*, 32);
+            var atom_list: std.ArrayListUnmanaged(c.Atom) = .{};
             defer atom_list.deinit(self.allocator.*);
             try com.get_window_property(c.Atom, &atom_list,
                     event.requestor, event.property, c.XA_ATOM, 32);
@@ -495,8 +491,7 @@ pub const rdp_x11_clip_t = struct
         {
             try self.session.logln(log.LogLevel.debug, @src(),
                     "target is utf8_atom", .{});
-            var utf8_list = try std.ArrayListUnmanaged(u8).initCapacity(
-                    self.allocator.*, 32);
+            var utf8_list: std.ArrayListUnmanaged(u8) = .{};
             defer utf8_list.deinit(self.allocator.*);
             try com.get_window_property(u8, &utf8_list,
                     event.requestor, event.property, x11.utf8_atom, 8);
@@ -564,13 +559,13 @@ pub const rdp_x11_clip_t = struct
         if ((base > 0) and (event.type == base + c.XFixesSelectionNotify))
         {
             const levent: *c.XFixesSelectionNotifyEvent = @ptrCast(event);
-            switch (levent.subtype)
+            try switch (levent.subtype)
             {
-                c.XFixesSetSelectionOwnerNotify => try self.handle_selection_set_owner(levent),
-                c.XFixesSelectionWindowDestroyNotify => try self.handle_selection_window_destory(levent),
-                c.XFixesSelectionClientCloseNotify => try self.handle_selection_client_close(levent),
-                else => try self.handle_selection_other(levent),
-            }
+                c.XFixesSetSelectionOwnerNotify => self.handle_selection_set_owner(levent),
+                c.XFixesSelectionWindowDestroyNotify => self.handle_selection_window_destory(levent),
+                c.XFixesSelectionClientCloseNotify => self.handle_selection_client_close(levent),
+                else => self.handle_selection_other(levent),
+            };
         }
     }
 
@@ -579,14 +574,14 @@ pub const rdp_x11_clip_t = struct
     {
         try self.session.logln_devel(log.LogLevel.debug, @src(),
                 "rdpc_x11_clip: event {}", .{event.type});
-        switch (event.type)
+        try switch (event.type)
         {
-            c.PropertyNotify => try self.handle_property_notify(&event.xproperty),
-            c.SelectionClear => try self.handle_selection_clear(&event.xselectionclear),
-            c.SelectionRequest => try self.handle_selection_request(&event.xselectionrequest),
-            c.SelectionNotify => try self.handle_selection_notify(&event.xselection),
-            else => try self.handle_other(event),
-        }
+            c.PropertyNotify => self.handle_property_notify(&event.xproperty),
+            c.SelectionClear => self.handle_selection_clear(&event.xselectionclear),
+            c.SelectionRequest => self.handle_selection_request(&event.xselectionrequest),
+            c.SelectionNotify => self.handle_selection_notify(&event.xselection),
+            else => self.handle_other(event),
+        };
     }
 
 };

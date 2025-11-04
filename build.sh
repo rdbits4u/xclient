@@ -59,6 +59,18 @@ then
     exit 0
 fi
 
+# pull
+if [ "$1" = "pull" ]
+then
+    for proj in $listOfProjects
+    do
+        echo "pulling ../$proj"
+        cd ../$proj
+        git pull
+    done
+    exit 0
+fi
+
 # release build
 for proj in $listOfProjects
 do

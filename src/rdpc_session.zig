@@ -57,6 +57,8 @@ const SesError = error
     JpgDecode,
 };
 
+const g_show_devel = false;
+
 //*****************************************************************************
 pub inline fn err_if(b: bool, err: SesError) !void
 {
@@ -170,9 +172,11 @@ pub const rdpsnd_format_t = struct
 
 const rdpsnd_formats_t = std.ArrayListUnmanaged(*rdpsnd_format_t);
 
+const c_rdpsnd_formats_t = std.ArrayListUnmanaged(c.rdpsnd_format_t);
+
 const timer_fn_t = ?*const fn (user: ?*anyopaque) anyerror!void;
 
-const timer_t = struct
+pub const timer_t = struct
 {
     trigger_mstime: i64 = 0,
     user: ?*anyopaque = null,
@@ -191,10 +195,10 @@ pub const rdp_session_t = struct
     cliprdr: *c.cliprdr_t,
     rdpsnd: *c.rdpsnd_t,
     edisp: *c.edisp_t,
-    formats: rdpsnd_formats_t,
     connected: bool = false,
     sck: i32 = -1,
     recv_start: usize = 0,
+    formats: rdpsnd_formats_t = .{},
     in_data_slice: []u8 = &.{},
     send_head: ?*send_t = null,
     send_tail: ?*send_t = null,
@@ -323,13 +327,10 @@ pub const rdp_session_t = struct
         edisp.send_data = rdpc_session_cb.cb_edisp_drdynvc_send_data;
         edisp.process_caps = rdpc_session_cb.cb_edisp_process_caps;
 
-        const formats = try rdpsnd_formats_t.initCapacity(allocator.*, 32);
-
         // init self
         self.* = .{.allocator = allocator, .rdp_connect = rdp_connect,
                 .rdpc = rdpc, .svc = svc, .drdynvc = drdynvc,
-                .cliprdr = cliprdr, .rdpsnd = rdpsnd, .edisp = edisp,
-                .formats = formats};
+                .cliprdr = cliprdr, .rdpsnd = rdpsnd, .edisp = edisp};
 
         self.workarea = settings.workarea != 0;
         self.width = @intCast(settings.width);
@@ -393,7 +394,10 @@ pub const rdp_session_t = struct
             comptime fmt: []const u8, args: anytype) !void
     {
         _ = self;
-        try log.logln_devel(lv, src, fmt, args);
+        if (g_show_devel)
+        {
+            try log.logln(lv, src, fmt, args);
+        }
     }
 
     //*************************************************************************
@@ -1001,7 +1005,7 @@ pub const rdp_session_t = struct
         while (true)
         {
             try self.logln_devel(log.LogLevel.debug, @src(), "loop", .{});
-
+            // get timeout
             timeout = -1;
             if (self.timer_list.items.len > 0)
             {
@@ -1019,7 +1023,6 @@ pub const rdp_session_t = struct
             }
             try self.logln_devel(log.LogLevel.debug, @src(),
                     "loop: timeout {}", .{timeout});
-
             poll_count = 0;
             // setup terminate fd
             polls[poll_count].fd = g_term[0];
@@ -1097,8 +1100,11 @@ pub const rdp_session_t = struct
                 }
                 if (pulse_index) |apulse_index|
                 {
-                    if ((active_polls[apulse_index].revents & posix.POLL.IN) != 0)
+                    const revents = active_polls[apulse_index].revents;
+                    if ((revents & posix.POLL.IN) != 0)
                     {
+                        try self.logln_devel(log.LogLevel.info, @src(),
+                                "pulse fd set", .{});
                         try self.process_write_pulse_data();
                     }
                 }
@@ -1107,7 +1113,7 @@ pub const rdp_session_t = struct
             {
                 try ardp_x11.check_fds();
             }
-
+            // check timers
             if (self.timer_list.items.len > 0)
             {
                 const now = std.time.milliTimestamp();
@@ -1128,7 +1134,6 @@ pub const rdp_session_t = struct
                     }
                 }
             }
-
         }
     }
 
@@ -1424,8 +1429,7 @@ pub const rdp_session_t = struct
                 "dgram_port {} version {} block_no {} num_formats {}",
                 .{channel_id, flags, volume, pitch, dgram_port, version,
                 block_no, num_formats});
-        var sformats = try std.ArrayListUnmanaged(c.rdpsnd_format_t).
-                initCapacity(self.allocator.*, 32);
+        var sformats: c_rdpsnd_formats_t = .{};
         defer sformats.deinit(self.allocator.*);
         if (self.pulse == null)
         {
@@ -1490,6 +1494,17 @@ pub const rdp_session_t = struct
         return 0;
     }
 
+    //*********************************************************************************
+    fn pixels_to_mm(pixels: u32, dpi: i32) u32
+    {
+        if (dpi == 0)
+        {
+            return 0;
+        }
+        const ldpi: u32 = @intCast(dpi);
+        return (pixels * 254 + ldpi * 5) / (ldpi * 10);
+    }
+
     //*****************************************************************************
     pub fn resize_desktop(self: *rdp_session_t, width: u32, height: u32) !void
     {
@@ -1500,6 +1515,8 @@ pub const rdp_session_t = struct
         monitors[0].Flags = 1;
         monitors[0].Width = width;
         monitors[0].Height = height;
+        monitors[0].PhysicalWidth = pixels_to_mm(width, 96);
+        monitors[0].PhysicalHeight = pixels_to_mm(height, 96);
         _ = c.edisp_send_monitor_layout(self.edisp,
                 self.drdynvc_svc_channel_id,
                 self.edisp_drdynvc_channel_id,
@@ -1507,46 +1524,49 @@ pub const rdp_session_t = struct
     }
 
     //*****************************************************************************
-    pub fn timer_set(self: *rdp_session_t, timer: ?*anyopaque, mstime: i32,
-            timer_fn: timer_fn_t, user: ?*anyopaque) !*anyopaque
+    fn time_set_items(timer: *timer_t, mstime: i32, timer_fn: timer_fn_t,
+            user: ?*anyopaque) void
+    {
+        timer.trigger_mstime = std.time.milliTimestamp() + mstime;
+        timer.user = user;
+        timer.timer_fn = timer_fn;
+    }
+
+    //*****************************************************************************
+    pub fn timer_set(self: *rdp_session_t, timer: ?*timer_t, mstime: i32,
+            timer_fn: timer_fn_t, user: ?*anyopaque) !*timer_t
     {
         var ltimer: *timer_t = undefined;
         if (timer) |atimer|
         {
-            const aatimer: *timer_t = @alignCast(@ptrCast(atimer));
             for (self.timer_list.items) |item|
             {
-                if (item == aatimer)
+                if (item == atimer)
                 {
-                    item.trigger_mstime = std.time.milliTimestamp() + mstime;
-                    item.user = user;
-                    item.timer_fn = timer_fn;
+                    time_set_items(item, mstime, timer_fn, user);
                     return atimer;
                 }
             }
-            ltimer = aatimer;
+            ltimer = atimer;
         }
         else
         {
             ltimer = try self.allocator.create(timer_t);
             ltimer.* = .{};
         }
-        ltimer.trigger_mstime = std.time.milliTimestamp() + mstime;
-        ltimer.user = user;
-        ltimer.timer_fn = timer_fn;
+        time_set_items(ltimer, mstime, timer_fn, user);
         try self.timer_list.append(self.allocator.*, ltimer);
         return ltimer;
     }
 
     //*****************************************************************************
-    pub fn timer_cancel(self: *rdp_session_t, timer: ?*anyopaque) void
+    pub fn timer_cancel(self: *rdp_session_t, timer: ?*timer_t) void
     {
         if (timer) |atimer|
         {
-            const aatimer: *timer_t = @alignCast(@ptrCast(atimer));
             for (self.timer_list.items, 0..) |item, index|
             {
-                if (item == aatimer)
+                if (item == atimer)
                 {
                     _ = self.timer_list.swapRemove(index);
                     return;
@@ -1556,13 +1576,12 @@ pub const rdp_session_t = struct
     }
 
     //*****************************************************************************
-    pub fn timer_free(self: *rdp_session_t, timer: ?*anyopaque) void
+    pub fn timer_free(self: *rdp_session_t, timer: ?*timer_t) void
     {
         self.timer_cancel(timer);
         if (timer) |atimer|
         {
-            const aatimer: *timer_t = @alignCast(@ptrCast(atimer));
-            self.allocator.destroy(aatimer);
+            self.allocator.destroy(atimer);
         }
     }
 

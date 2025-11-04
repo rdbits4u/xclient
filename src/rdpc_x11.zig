@@ -75,7 +75,7 @@ pub const rdp_x11_t = struct
     xfixes_error_base: i32 = 0,
     max_request_size: c_long = 0,
     ex_max_request_size: c_long = 0,
-    resize_timer: ?*anyopaque = null,
+    resize_timer: ?*rdpc_session.timer_t = null,
 
     //*************************************************************************
     pub fn create(session: *rdpc_session.rdp_session_t,
@@ -124,8 +124,7 @@ pub const rdp_x11_t = struct
 
         if (workarea)
         {
-            var long_list = try std.ArrayListUnmanaged(c_long).initCapacity(
-                    self.allocator.*, 32);
+            var long_list: std.ArrayListUnmanaged(c_long) = .{};
             defer long_list.deinit(self.allocator.*);
             try rdp_x11_common.get_window_property(c_long, &long_list,
                     self.root_window, self.net_workarea, c.XA_CARDINAL, 32);
@@ -576,10 +575,12 @@ pub const rdp_x11_t = struct
         const height: c_uint = @bitCast(event.height);
         if ((self.window == event.window) and (event.event == event.window))
         {
+            if ((width != self.width) or (height != self.height))
+            {
+                self.resize_timer = try self.session.timer_set(
+                        self.resize_timer, 1000, resize_timer_fn, self);
+            }
             try self.check_pixmap(width, height);
-            self.resize_timer = try self.session.timer_set(
-                    self.resize_timer, 1000, resize_timer_fn, self);
-
         }
     }
 
@@ -617,24 +618,24 @@ pub const rdp_x11_t = struct
             try self.session.logln_devel(log.LogLevel.debug, @src(), "loop", .{});
             var event = std.mem.zeroes(c.XEvent);
             _ = c.XNextEvent(self.display, &event);
-            switch (event.type)
+            try switch (event.type)
             {
-                c.KeyPress => try self.handle_key_press(&event.xkey),
-                c.KeyRelease => try self.handle_key_release(&event.xkey),
-                c.ButtonPress => try self.handle_button_press(&event.xbutton),
-                c.ButtonRelease => try self.handle_button_release(&event.xbutton),
-                c.MotionNotify => try self.handle_motion(&event.xmotion),
-                c.FocusIn => try self.handle_focus_in(&event.xfocus),
-                c.FocusOut => try self.handle_focus_out(&event.xfocus),
-                c.Expose => try self.handle_expose(&event.xexpose),
-                c.VisibilityNotify => try self.handle_visibility(&event.xvisibility),
-                c.DestroyNotify => try self.handle_destroy(&event.xdestroywindow),
-                c.UnmapNotify => try self.handle_unmap(&event.xunmap),
-                c.MapNotify => try self.handle_map(&event.xmap),
-                c.ConfigureNotify => try self.handle_configure(&event.xconfigure),
-                c.ClientMessage => try self.handle_client_message(&event.xclient),
-                else => try self.handle_other(&event),
-            }
+                c.KeyPress => self.handle_key_press(&event.xkey),
+                c.KeyRelease => self.handle_key_release(&event.xkey),
+                c.ButtonPress => self.handle_button_press(&event.xbutton),
+                c.ButtonRelease => self.handle_button_release(&event.xbutton),
+                c.MotionNotify => self.handle_motion(&event.xmotion),
+                c.FocusIn => self.handle_focus_in(&event.xfocus),
+                c.FocusOut => self.handle_focus_out(&event.xfocus),
+                c.Expose => self.handle_expose(&event.xexpose),
+                c.VisibilityNotify => self.handle_visibility(&event.xvisibility),
+                c.DestroyNotify => self.handle_destroy(&event.xdestroywindow),
+                c.UnmapNotify => self.handle_unmap(&event.xunmap),
+                c.MapNotify => self.handle_map(&event.xmap),
+                c.ConfigureNotify => self.handle_configure(&event.xconfigure),
+                c.ClientMessage => self.handle_client_message(&event.xclient),
+                else => self.handle_other(&event),
+            };
             try self.rdp_x11_clip.handle_clip_message(&event);
         }
     }
@@ -887,8 +888,7 @@ pub const rdp_x11_t = struct
             if (clips) |aclips|
             {
                 // copy aclips to lclips
-                const clips_t = std.ArrayListUnmanaged(c.XRectangle);
-                var lclips = try clips_t.initCapacity(self.allocator.*, 32);
+                var lclips: std.ArrayListUnmanaged(c.XRectangle) = .{};
                 defer lclips.deinit(self.allocator.*);
                 var index: usize = 0;
                 while (index < num_clips) : (index += 1)
@@ -985,8 +985,6 @@ pub const rdp_x11_t = struct
     //*************************************************************************
     pub fn pointer_update(self: *rdp_x11_t, pointer: *c.pointer_t) !void
     {
-        // _ = self;
-        // _ = pointer;
         try self.session.logln_devel(log.LogLevel.debug, @src(), "xor_bpp {}",
                 .{pointer.xor_bpp});
         if (self.pointer_cache.len < 1)
@@ -1088,9 +1086,10 @@ fn u16_from_c_int(in: c_int) u16
 fn resize_timer_fn(user: ?*anyopaque) !void
 {
     const self: *rdp_x11_t = @alignCast(@ptrCast(user));
+    const al: c_uint = 3;
+    const width = self.width & ~al;
+    const height = self.height & ~al;
     try self.session.logln(log.LogLevel.debug, @src(), "width {} height {}",
             .{self.width, self.height});
-    //const width = self.width ;
-    //const height = self.height;
-    //try self.session.resize_desktop(width, height);
+    try self.session.resize_desktop(width, height);
 }
